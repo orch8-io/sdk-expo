@@ -1,0 +1,49 @@
+{
+  "name": "@orch8.io/expo",
+  "version": "0.1.0",
+  "description": "Expo SDK for Orch8 workflow engine — REST client, React hooks, and native engine bridge",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./build/index.d.ts",
+        "default": "./build/index.js"
+      },
+      "require": {
+        "types": "./build/index.d.ts",
+        "default": "./build/index.js"
+      }
+    }
+  },
+  "files": ["build", "ios", "android", "expo-module.config.json", "!build/__tests__"],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf build"
+  },
+  "keywords": ["orch8", "workflow", "orchestration", "expo", "react-native", "mobile"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/orch8-io/sdk-expo"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "expo": ">=51.0.0",
+    "react": ">=18.0.0",
+    "react-native": ">=0.74.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/react": "^18.0.0",
+    "expo": "^52.0.0",
+    "expo-modules-core": "^2.0.0",
+    "react": "^18.0.0",
+    "react-native": "^0.76.0",
+    "typescript": "^5.4.0",
+    "vitest": "^3.0.0"
+  }
+}

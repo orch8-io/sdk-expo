@@ -1,0 +1,27 @@
+# JS
+node_modules/
+build/
+*.tsbuildinfo
+
+# iOS
+ios/Pods/
+ios/build/
+ios/*.xcworkspace
+ios/*.xcodeproj/xcuserdata/
+ios/*.xcodeproj/project.xcworkspace/xcshareddata/
+ios/DerivedData/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xcuserstate
+
+# Android
+android/libs/
+android/build/
+android/.gradle/
+android/local.properties
+android/app/build/
+
+# Expo
+.expo/

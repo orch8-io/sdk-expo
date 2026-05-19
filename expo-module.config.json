@@ -1,0 +1,9 @@
+{
+  "platforms": ["ios", "android"],
+  "ios": {
+    "modules": ["Orch8ExpoModule"]
+  },
+  "android": {
+    "modules": ["io.orch8.expo.Orch8ExpoModule"]
+  }
+}
