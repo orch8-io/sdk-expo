@@ -7,12 +7,48 @@ export interface Orch8ClientConfig {
   getHeaders?: () => Record<string, string> | Promise<Record<string, string>>;
   retry?: RetryConfig | false;
   timeoutMs?: number;
+  onRequest?: (event: RequestEvent) => void;
+  onResponse?: (event: ResponseEvent) => void;
 }
 
 export interface RetryConfig {
+  /** Total attempts, including the first request. Defaults to 3. */
   maxAttempts?: number;
+  /** Initial exponential-backoff delay. Defaults to 250 milliseconds. */
   baseDelayMs?: number;
+  /** Called before retrying; attempt is the one-based next attempt. */
   onRetry?: (error: unknown, attempt: number) => void;
+}
+
+export interface RequestEvent {
+  method: string;
+  path: string;
+  attempt: number;
+  maxAttempts: number;
+}
+
+export interface ResponseEvent extends RequestEvent {
+  durationMs: number;
+  status?: number;
+  error?: unknown;
+}
+
+export interface Page<T> {
+  items: T[];
+  next_cursor: string | null;
+  total?: number;
+}
+
+export interface InstanceStreamOptions {
+  pollMs?: number;
+  lastEventId?: string;
+  signal?: AbortSignal;
+}
+
+export interface ResumableInstanceSSEEvent {
+  id?: string;
+  event?: string;
+  data: InstanceSSEEvent;
 }
 
 export interface SequenceDefinition {
@@ -23,8 +59,18 @@ export interface SequenceDefinition {
   version: number;
   deprecated: boolean;
   blocks: Block[];
-  interceptors?: Block[];
+  interceptors?: unknown;
+  input_schema?: unknown;
+  sla?: { max_runtime?: number; max_step_runtime?: number };
+  on_failure?: Block[];
+  on_cancel?: Block[];
+  status?: "draft" | "staging" | "production" | "unpublished";
   created_at: string;
+}
+
+export interface CreateSequenceResponse {
+  id: string;
+  warnings?: string[];
 }
 
 export interface Block {
@@ -34,6 +80,54 @@ export interface Block {
   params?: Record<string, unknown>;
   cancellable?: boolean;
   wait_for_input?: WaitForInput;
+  fallback_handler?: string;
+  cache_key?: string;
+  output_schema?: unknown;
+  when?: string;
+  compensation?: StepCompensation;
+  retry?: RetryPolicy;
+  delay?: DelaySpec;
+  blocks?: Block[];
+  body?: Block[];
+  branches?: Block[][];
+  steps?: SagaStep[];
+  condition?: string;
+  collection?: string;
+  break_on?: string;
+  continue_on_error?: boolean;
+  poll_interval?: number;
+  retain_iterations?: number;
+}
+
+export interface RetryPolicy {
+  max_attempts?: number;
+  initial_backoff?: number;
+  max_backoff?: number;
+  backoff_multiplier?: number;
+  retry_if?: string;
+  non_retryable_codes?: string[];
+}
+
+export interface DelaySpec {
+  duration: number;
+  business_days_only?: boolean;
+  jitter?: number;
+  holidays?: string[];
+  fire_at_local?: string;
+  timezone?: string;
+}
+
+export interface StepCompensation {
+  handler: string;
+  params?: unknown;
+  depends_on?: string[];
+  verification?: "handler_result" | "provider_receipt" | "manual";
+}
+
+export interface SagaStep {
+  id: string;
+  action: Block;
+  compensation?: Block;
 }
 
 export interface WaitForInput {
@@ -197,7 +291,17 @@ export interface WorkerTask {
   output: unknown;
   error_message: string | null;
   error_retryable: boolean | null;
+  resume_checkpoint?: unknown;
+  checkpoint_seq: number;
   created_at: string;
+}
+
+export interface NativeContinuityImportResult {
+  capsuleId: string;
+  continuityId: string;
+  instanceId: string;
+  sourceEpoch: number;
+  state: string;
 }
 
 export interface ClusterNode {
@@ -277,10 +381,10 @@ export interface Credential {
 // ---------------------------------------------------------------------------
 
 export type CreateInstanceBody = {
-  sequence_name: string;
+  sequence_id: string;
   namespace?: string;
   tenant_id?: string;
-  input?: Record<string, unknown>;
+  context?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   priority?: number;
   timezone?: string;
@@ -288,15 +392,27 @@ export type CreateInstanceBody = {
   max_concurrency?: number;
   idempotency_key?: string;
   session_id?: string;
-  scheduled_at?: string;
+  parent_instance_id?: string;
+  next_fire_at?: string;
+  dry_run?: boolean;
+  dry_run_auto_approve?: boolean;
 };
 
 export type CreateSequenceBody = {
+  id?: string;
   name: string;
   tenant_id?: string;
   namespace?: string;
+  version?: number;
+  deprecated?: boolean;
+  status?: "draft" | "staging" | "production" | "unpublished";
   blocks: Block[];
-  interceptors?: Block[];
+  interceptors?: unknown;
+  input_schema?: unknown;
+  sla?: { max_runtime?: number; max_step_runtime?: number };
+  on_failure?: Block[];
+  on_cancel?: Block[];
+  created_at?: string;
 };
 
 export type MigrateInstanceBody = {
@@ -423,7 +539,13 @@ export type FailTaskBody = {
 
 export type HeartbeatTaskBody = {
   progress?: Record<string, unknown>;
+  checkpoint?: unknown;
+  checkpoint_seq?: number;
 };
+
+export interface HeartbeatResponse {
+  checkpoint_seq: number;
+}
 
 export type CreatePoolBody = {
   name: string;
@@ -483,7 +605,9 @@ export type InstanceStateKind =
 export type PowerState = "charging" | "unplugged" | "lowBattery" | "criticalBattery";
 
 export interface NativeEngineConfig {
+  /** @deprecated Tenant identity is carried by loaded sequences in the current mobile engine. */
   tenantId?: string;
+  /** @deprecated Namespace is carried by loaded sequences in the current mobile engine. */
   namespace?: string;
   tickIntervalMs?: number;
   maxConcurrentSteps?: number;
@@ -497,26 +621,39 @@ export interface NativeEngineConfig {
   maxInstanceLifetimeSecs?: number;
   memoryBudgetBytes?: number;
   telemetryEnabled?: boolean;
-  environment?: string;
+  telemetryUrl?: string;
+  environment?: "production" | "staging";
   rootPublicKey?: string;
   sequencesUrl?: string;
+  syncUrl?: string;
+  deviceId?: string;
+  syncApiKey?: string;
 }
 
-export const NATIVE_ENGINE_DEFAULTS: Required<Omit<NativeEngineConfig, "rootPublicKey" | "sequencesUrl" | "environment">> = {
-  tenantId: "mobile",
-  namespace: "default",
-  tickIntervalMs: 200,
+export const NATIVE_ENGINE_DEFAULTS: Required<Omit<
+  NativeEngineConfig,
+  | "tenantId"
+  | "namespace"
+  | "rootPublicKey"
+  | "sequencesUrl"
+  | "telemetryUrl"
+  | "environment"
+  | "syncUrl"
+  | "deviceId"
+  | "syncApiKey"
+>> = {
+  tickIntervalMs: 100,
   maxConcurrentSteps: 4,
-  maxConcurrentInstances: 50,
+  maxConcurrentInstances: 10,
   maxStepsPerInstance: 1000,
   handlerTimeoutMs: 30_000,
   maxTickDurationMs: 5_000,
   operationTimeoutMs: 10_000,
-  maxStoredSequences: 100,
+  maxStoredSequences: 50,
   maxSequenceSizeBytes: 1_048_576,
   maxInstanceLifetimeSecs: 86_400,
   memoryBudgetBytes: 0,
-  telemetryEnabled: false,
+  telemetryEnabled: true,
 };
 
 export interface NativeInstanceSummary {
@@ -539,6 +676,13 @@ export interface NativeTickResult {
   instancesAdvanced: number;
   stepsExecuted: number;
   hasPendingWork: boolean;
+}
+
+/** Aggregate result from a bounded OS-granted background execution window. */
+export interface NativeBackgroundRunResult extends NativeTickResult {
+  ticksExecuted: number;
+  /** Work remains after the window ended or a tick made no progress. */
+  budgetExhausted: boolean;
 }
 
 export interface NativeSequenceInfo {

@@ -4,8 +4,10 @@ import type {
   NativeInstanceSummary,
   NativeInstanceState,
   NativeTickResult,
+  NativeBackgroundRunResult,
   NativeSequenceInfo,
   NativeSyncResult,
+  NativeContinuityImportResult,
   PowerState,
 } from "./types.js";
 
@@ -16,12 +18,25 @@ interface Orch8NativeModule {
   resume(): void;
   pause(): void;
   tickOnce(): Promise<NativeTickResult>;
+  runUntilIdle(maxTicks: number, timeBudgetMs: number): Promise<NativeBackgroundRunResult>;
   reportPowerState(state: PowerState): void;
   start(sequenceName: string, input: string, dedupKey?: string): string;
   cancelInstance(instanceId: string): void;
   getInstance(instanceId: string): NativeInstanceState;
   activeInstances(): NativeInstanceSummary[];
   completeStep(instanceId: string, stepName: string, output: string): void;
+  importContinuityCapsule(
+    capsuleJson: string,
+    payloadBase64: string,
+    payloadKeyBase64: string,
+    destinationRuntimeId: string,
+    destinationInstanceId: string,
+  ): NativeContinuityImportResult;
+  activateContinuityCapsule(
+    capsuleId: string,
+    destinationRuntimeId: string,
+    destinationInstanceId: string,
+  ): void;
   loadSequenceFromJson(json: string): void;
   loadSequencesFromUrl(url: string): Promise<number>;
   loadedSequences(): NativeSequenceInfo[];
@@ -94,6 +109,18 @@ export class NativeEngine {
     return NativeModule.tickOnce();
   }
 
+  /** Drain work within an OS-granted background window. */
+  runUntilIdle(maxTicks = 25, timeBudgetMs = 20_000): Promise<NativeBackgroundRunResult> {
+    this.assertReady();
+    if (!Number.isInteger(maxTicks) || maxTicks <= 0) {
+      throw new Error("maxTicks must be a positive integer");
+    }
+    if (!Number.isFinite(timeBudgetMs) || timeBudgetMs <= 0) {
+      throw new Error("timeBudgetMs must be greater than zero");
+    }
+    return NativeModule.runUntilIdle(maxTicks, timeBudgetMs);
+  }
+
   reportPowerState(state: PowerState): void {
     this.assertReady();
     NativeModule.reportPowerState(state);
@@ -136,6 +163,36 @@ export class NativeEngine {
   completeStep(instanceId: string, stepName: string, output: Record<string, unknown> = {}): void {
     this.assertReady();
     NativeModule.completeStep(instanceId, stepName, JSON.stringify(output));
+  }
+
+  importContinuityCapsule(
+    capsuleJson: string | Record<string, unknown>,
+    payloadBase64: string,
+    payloadKeyBase64: string,
+    destinationRuntimeId: string,
+    destinationInstanceId: string,
+  ): NativeContinuityImportResult {
+    this.assertReady();
+    return NativeModule.importContinuityCapsule(
+      typeof capsuleJson === "string" ? capsuleJson : JSON.stringify(capsuleJson),
+      payloadBase64,
+      payloadKeyBase64,
+      destinationRuntimeId,
+      destinationInstanceId,
+    );
+  }
+
+  activateContinuityCapsule(
+    capsuleId: string,
+    destinationRuntimeId: string,
+    destinationInstanceId: string,
+  ): void {
+    this.assertReady();
+    NativeModule.activateContinuityCapsule(
+      capsuleId,
+      destinationRuntimeId,
+      destinationInstanceId,
+    );
   }
 
   loadSequenceFromJson(json: string | Record<string, unknown>): void {

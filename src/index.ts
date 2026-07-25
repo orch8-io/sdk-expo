@@ -1,6 +1,7 @@
 // Client
 export { Orch8Client, Orch8Error } from "./client.js";
 export type { IOrch8Client } from "./client.js";
+export { ORCH8_API_VERSION, ORCH8_ROUTES } from "./generated/routes.js";
 
 // Native engine bridge
 export { NativeEngine } from "./native.js";
@@ -34,8 +35,18 @@ export type {
 export type {
   Orch8ClientConfig,
   RetryConfig,
+  RequestEvent,
+  ResponseEvent,
+  Page,
+  InstanceStreamOptions,
+  ResumableInstanceSSEEvent,
   SequenceDefinition,
+  CreateSequenceResponse,
   Block,
+  DelaySpec,
+  RetryPolicy,
+  StepCompensation,
+  SagaStep,
   WaitForInput,
   TaskInstance,
   TaskInstanceState,
@@ -60,6 +71,7 @@ export type {
   BulkResponse,
   BatchCreateResponse,
   HealthResponse,
+  HeartbeatResponse,
   ResourcePool,
   PoolResource,
   PoolResourceState,
@@ -111,7 +123,9 @@ export type {
   NativeInstanceSummary,
   NativeInstanceState,
   NativeTickResult,
+  NativeBackgroundRunResult,
   NativeSequenceInfo,
   NativeSyncResult,
+  NativeContinuityImportResult,
   InstanceBase,
 } from "./types.js";

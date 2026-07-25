@@ -19,21 +19,26 @@ class Orch8ExpoModule : Module() {
 
         Function("createEngine") { dbPath: String, config: Map<String, Any?> ->
             val cfg = MobileEngineConfig(
-                tenantId = config["tenantId"] as? String ?: "mobile",
-                namespace = config["namespace"] as? String ?: "default",
-                tickIntervalMs = (config["tickIntervalMs"] as? Number)?.toLong() ?: 200L,
+                tickIntervalMs = (config["tickIntervalMs"] as? Number)?.toLong() ?: 100L,
                 maxConcurrentSteps = (config["maxConcurrentSteps"] as? Number)?.toInt() ?: 4,
-                maxConcurrentInstances = (config["maxConcurrentInstances"] as? Number)?.toInt() ?: 50,
-                handlerTimeoutMs = (config["handlerTimeoutMs"] as? Number)?.toLong() ?: 30000L,
-                maxStoredSequences = (config["maxStoredSequences"] as? Number)?.toInt() ?: 100,
-                maxSequenceSizeBytes = (config["maxSequenceSizeBytes"] as? Number)?.toLong() ?: 1048576L,
-                maxInstanceLifetimeSecs = (config["maxInstanceLifetimeSecs"] as? Number)?.toLong() ?: 86400L,
+                maxStepsPerInstance = (config["maxStepsPerInstance"] as? Number)?.toInt() ?: 1000,
+                maxConcurrentInstances = (config["maxConcurrentInstances"] as? Number)?.toInt() ?: 10,
                 maxTickDurationMs = (config["maxTickDurationMs"] as? Number)?.toLong() ?: 5000L,
-                memoryBudgetBytes = (config["memoryBudgetBytes"] as? Number)?.toLong() ?: 0L,
-                telemetryEnabled = config["telemetryEnabled"] as? Boolean ?: false,
+                maxInstanceLifetimeSecs = (config["maxInstanceLifetimeSecs"] as? Number)?.toLong() ?: 86400L,
+                maxStoredSequences = (config["maxStoredSequences"] as? Number)?.toInt() ?: 50,
+                maxSequenceSizeBytes = (config["maxSequenceSizeBytes"] as? Number)?.toLong() ?: 1048576L,
+                handlerTimeoutMs = (config["handlerTimeoutMs"] as? Number)?.toLong() ?: 30000L,
+                operationTimeoutMs = (config["operationTimeoutMs"] as? Number)?.toLong() ?: 10000L,
+                telemetryEnabled = config["telemetryEnabled"] as? Boolean ?: true,
+                telemetryUrl = config["telemetryUrl"] as? String ?: "",
+                environment = config["environment"] as? String ?: "production",
                 rootPublicKey = config["rootPublicKey"] as? String ?: "",
+                sdkVersion = "expo-0.3.0",
+                memoryBudgetBytes = (config["memoryBudgetBytes"] as? Number)?.toLong() ?: 0L,
                 sequencesUrl = config["sequencesUrl"] as? String ?: "",
-                sdkVersion = "expo-0.1.0",
+                syncUrl = config["syncUrl"] as? String ?: "",
+                deviceId = config["deviceId"] as? String ?: "",
+                syncApiKey = config["syncApiKey"] as? String ?: "",
             )
             engine = MobileEngine(dbPath, cfg)
         }
@@ -66,6 +71,21 @@ class Orch8ExpoModule : Module() {
                 "instancesAdvanced" to result.instancesAdvanced,
                 "stepsExecuted" to result.stepsExecuted,
                 "hasPendingWork" to result.hasPendingWork,
+            )
+        }
+
+        AsyncFunction("runUntilIdle") { maxTicks: Int, timeBudgetMs: Long ->
+            val eng = engine ?: throw EngineNotInitialized()
+            require(maxTicks > 0 && timeBudgetMs > 0) {
+                "maxTicks and timeBudgetMs must be greater than zero"
+            }
+            val result = eng.runUntilIdle(maxTicks.toUInt(), timeBudgetMs.toULong())
+            mapOf(
+                "ticksExecuted" to result.ticksExecuted.toInt(),
+                "instancesAdvanced" to result.instancesAdvanced.toInt(),
+                "stepsExecuted" to result.stepsExecuted.toInt(),
+                "hasPendingWork" to result.hasPendingWork,
+                "budgetExhausted" to result.budgetExhausted,
             )
         }
 
@@ -118,6 +138,33 @@ class Orch8ExpoModule : Module() {
         Function("completeStep") { instanceId: String, stepName: String, output: String ->
             val eng = engine ?: throw EngineNotInitialized()
             eng.completeStep(instanceId, stepName, output)
+        }
+
+        Function("importContinuityCapsule") { capsuleJson: String, payloadBase64: String, payloadKeyBase64: String, destinationRuntimeId: String, destinationInstanceId: String ->
+            val eng = engine ?: throw EngineNotInitialized()
+            val result = eng.importContinuityCapsule(
+                capsuleJson,
+                payloadBase64,
+                payloadKeyBase64,
+                destinationRuntimeId,
+                destinationInstanceId,
+            )
+            mapOf(
+                "capsuleId" to result.capsuleId,
+                "continuityId" to result.continuityId,
+                "instanceId" to result.instanceId,
+                "sourceEpoch" to result.sourceEpoch,
+                "state" to result.state,
+            )
+        }
+
+        Function("activateContinuityCapsule") { capsuleId: String, destinationRuntimeId: String, destinationInstanceId: String ->
+            val eng = engine ?: throw EngineNotInitialized()
+            eng.activateContinuityCapsule(
+                capsuleId,
+                destinationRuntimeId,
+                destinationInstanceId,
+            )
         }
 
         Function("loadSequenceFromJson") { json: String ->

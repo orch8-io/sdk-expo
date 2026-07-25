@@ -1,7 +1,13 @@
 import type {
   Orch8ClientConfig,
   RetryConfig,
+  RequestEvent,
+  ResponseEvent,
+  Page,
+  InstanceStreamOptions,
+  ResumableInstanceSSEEvent,
   SequenceDefinition,
+  CreateSequenceResponse,
   TaskInstance,
   StepOutput,
   ExecutionNode,
@@ -47,6 +53,7 @@ import type {
   CompleteTaskBody,
   FailTaskBody,
   HeartbeatTaskBody,
+  HeartbeatResponse,
   CreatePoolBody,
   CreatePoolResourceBody,
   UpdatePoolResourceBody,
@@ -67,8 +74,10 @@ export class Orch8Error extends Error {
 }
 
 export interface IOrch8Client {
+  request<T = unknown>(method: string, path: string, body?: unknown): Promise<T>;
+  requestPage<T>(path: string, query?: Record<string, string>): Promise<Page<T>>;
   // Sequences
-  createSequence(body: CreateSequenceBody): Promise<SequenceDefinition>;
+  createSequence(body: CreateSequenceBody): Promise<CreateSequenceResponse>;
   getSequence(id: string): Promise<SequenceDefinition>;
   getSequenceByName(tenantId: string, namespace: string, name: string, version?: number): Promise<SequenceDefinition>;
   deprecateSequence(id: string): Promise<void>;
@@ -94,6 +103,7 @@ export interface IOrch8Client {
   listAuditLog(id: string): Promise<AuditEntry[]>;
   injectBlocks(id: string, body: InjectBlocksBody): Promise<void>;
   streamInstance(id: string, signal?: AbortSignal): AsyncGenerator<InstanceSSEEvent>;
+  streamInstanceEvents(id: string, options?: InstanceStreamOptions): AsyncGenerator<ResumableInstanceSSEEvent>;
   bulkUpdateState(body: BulkUpdateStateBody): Promise<BulkResponse>;
   bulkReschedule(body: BulkRescheduleBody): Promise<BulkResponse>;
   listDLQ(filter?: Record<string, string>): Promise<TaskInstance[]>;
@@ -128,7 +138,7 @@ export interface IOrch8Client {
   pollTasks(body: PollTasksBody): Promise<WorkerTask[]>;
   completeTask(id: string, body: CompleteTaskBody): Promise<void>;
   failTask(id: string, body: FailTaskBody): Promise<void>;
-  heartbeatTask(id: string, body: HeartbeatTaskBody): Promise<void>;
+  heartbeatTask(id: string, body: HeartbeatTaskBody): Promise<HeartbeatResponse>;
   listWorkerTasks(filter?: Record<string, string>): Promise<WorkerTask[]>;
   getWorkerTaskStats(): Promise<WorkerTaskStats>;
   // Circuit Breakers
@@ -157,7 +167,7 @@ export interface IOrch8Client {
   health(): Promise<HealthResponse>;
 }
 
-const DEFAULT_RETRY: RetryConfig = { maxAttempts: 3, baseDelayMs: 1000 };
+const DEFAULT_RETRY: RetryConfig = { maxAttempts: 3, baseDelayMs: 250 };
 
 export class Orch8Client implements IOrch8Client {
   private readonly baseUrl: string;
@@ -167,6 +177,8 @@ export class Orch8Client implements IOrch8Client {
   private readonly retryConfig: RetryConfig | false;
   private readonly timeoutMs: number;
   private readonly getHeaders?: () => Record<string, string> | Promise<Record<string, string>>;
+  private readonly onRequest?: (event: RequestEvent) => void;
+  private readonly onResponse?: (event: ResponseEvent) => void;
 
   constructor(config: Orch8ClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
@@ -176,6 +188,8 @@ export class Orch8Client implements IOrch8Client {
     this.getHeaders = config.getHeaders;
     this.retryConfig = config.retry === false ? false : { ...DEFAULT_RETRY, ...config.retry };
     this.timeoutMs = config.timeoutMs ?? 30_000;
+    this.onRequest = config.onRequest;
+    this.onResponse = config.onResponse;
   }
 
   private async buildHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
@@ -200,74 +214,96 @@ export class Orch8Client implements IOrch8Client {
     return encodeURIComponent(segment);
   }
 
-  private async request<T>(
+  async request<T = unknown>(
     method: string,
     path: string,
     body?: unknown,
   ): Promise<T> {
-    const isIdempotent = method === "GET" || method === "HEAD";
+    if (!path.startsWith("/") || path.startsWith("//")) {
+      throw new TypeError("path must start with exactly one '/' character");
+    }
+    const normalizedMethod = method.toUpperCase();
+    const isIdempotent = normalizedMethod === "GET" || normalizedMethod === "HEAD";
     const maxAttempts =
       this.retryConfig && isIdempotent
         ? (this.retryConfig.maxAttempts ?? 3)
         : 1;
     const baseDelay =
-      this.retryConfig ? (this.retryConfig.baseDelayMs ?? 1000) : 1000;
+      this.retryConfig ? (this.retryConfig.baseDelayMs ?? 250) : 250;
 
     let lastError: unknown;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const event = {
+        method: normalizedMethod,
+        path,
+        attempt: attempt + 1,
+        maxAttempts,
+      };
+      const startedAt = Date.now();
+      this.observe(this.onRequest, event);
       try {
         const headers = await this.buildHeaders();
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
-        let res: Response;
         try {
-          res = await fetch(`${this.baseUrl}${path}`, {
-            method,
+          const res = await fetch(`${this.baseUrl}${path}`, {
+            method: normalizedMethod,
             headers,
             body: body !== undefined ? JSON.stringify(body) : undefined,
             signal: controller.signal,
           });
+
+          const text = res.status === 204 ? "" : await res.text();
+          const parsed = text ? this.parseBody(text) : undefined;
+          if (!res.ok) {
+            const error = new Orch8Error(res.status, parsed, path);
+            this.observe(this.onResponse, {
+              ...event,
+              status: res.status,
+              durationMs: Date.now() - startedAt,
+              error,
+            });
+            if (this.isRetryableStatus(res.status) && attempt < maxAttempts - 1) {
+              clearTimeout(timeoutId);
+              if (this.retryConfig && this.retryConfig.onRetry) {
+                this.retryConfig.onRetry(error, attempt + 2);
+              }
+              await this.delay(baseDelay * Math.pow(2, attempt));
+              continue;
+            }
+            throw error;
+          }
+
+          this.observe(this.onResponse, {
+            ...event,
+            status: res.status,
+            durationMs: Date.now() - startedAt,
+          });
+
+          if (!text) {
+            return undefined as unknown as T;
+          }
+          if (typeof parsed !== "object" || parsed === null) {
+            throw new Orch8Error(res.status, parsed, path);
+          }
+          return parsed as T;
         } finally {
           clearTimeout(timeoutId);
         }
-
-        if (!res.ok) {
-          if (res.status >= 500 && attempt < maxAttempts - 1) {
-            if (this.retryConfig && this.retryConfig.onRetry) {
-              this.retryConfig.onRetry(new Orch8Error(res.status, null, path), attempt);
-            }
-            await this.delay(baseDelay * Math.pow(2, attempt));
-            continue;
-          }
-          let resBody: unknown;
-          try {
-            resBody = await res.json();
-          } catch {
-            resBody = await res.text().catch(() => null);
-          }
-          throw new Orch8Error(res.status, resBody, path);
-        }
-
-        if (res.status === 204) {
-          return undefined as unknown as T;
-        }
-
-        const text = await res.text();
-        if (!text) {
-          return undefined as unknown as T;
-        }
-        const parsed: unknown = JSON.parse(text);
-        if (typeof parsed !== "object" || parsed === null) {
-          throw new Orch8Error(res.status, parsed, path);
-        }
-        return parsed as T;
       } catch (err) {
         lastError = err;
+        if (!(err instanceof Orch8Error)) {
+          this.observe(this.onResponse, {
+            ...event,
+            durationMs: Date.now() - startedAt,
+            error: err,
+          });
+        }
         if (err instanceof Orch8Error) throw err;
         if (attempt < maxAttempts - 1) {
           if (this.retryConfig && this.retryConfig.onRetry) {
-            this.retryConfig.onRetry(err, attempt);
+            this.retryConfig.onRetry(err, attempt + 2);
           }
           await this.delay(baseDelay * Math.pow(2, attempt));
           continue;
@@ -275,6 +311,43 @@ export class Orch8Client implements IOrch8Client {
       }
     }
     throw lastError;
+  }
+
+  private observe<T>(observer: ((event: T) => void) | undefined, event: T): void {
+    try {
+      observer?.(event);
+    } catch {
+      // Observability must never change request behavior.
+    }
+  }
+
+  async requestPage<T>(
+    path: string,
+    query?: Record<string, string>,
+  ): Promise<Page<T>> {
+    const separator = path.includes("?") ? "&" : "?";
+    const suffix = query && Object.keys(query).length > 0
+      ? `${separator}${new URLSearchParams(query)}`
+      : "";
+    const result = await this.request<T[] | Partial<Page<T>>>("GET", `${path}${suffix}`);
+    if (Array.isArray(result)) return { items: result, next_cursor: null };
+    return {
+      items: result.items ?? [],
+      next_cursor: result.next_cursor ?? null,
+      ...(result.total === undefined ? {} : { total: result.total }),
+    };
+  }
+
+  private parseBody(text: string): unknown {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  }
+
+  private isRetryableStatus(status: number): boolean {
+    return status === 408 || status === 425 || status === 429 || status >= 500;
   }
 
   private async requestVoid(
@@ -311,8 +384,27 @@ export class Orch8Client implements IOrch8Client {
 
   // -- Sequences --
 
-  createSequence(body: CreateSequenceBody): Promise<SequenceDefinition> {
-    return this.post<SequenceDefinition>("/sequences", body);
+  createSequence(body: CreateSequenceBody): Promise<CreateSequenceResponse> {
+    const tenantId = body.tenant_id ?? this.tenantId;
+    if (!tenantId) {
+      return Promise.reject(new TypeError("tenant_id is required to create a sequence"));
+    }
+    const id = body.id ?? globalThis.crypto?.randomUUID?.();
+    if (!id) {
+      return Promise.reject(
+        new Error("id is required when crypto.randomUUID is unavailable"),
+      );
+    }
+    return this.post<CreateSequenceResponse>("/sequences", {
+      ...body,
+      id,
+      tenant_id: tenantId,
+      namespace: body.namespace ?? this.namespace ?? "default",
+      version: body.version ?? 1,
+      deprecated: body.deprecated ?? false,
+      status: body.status ?? "production",
+      created_at: body.created_at ?? new Date().toISOString(),
+    });
   }
 
   getSequence(id: string): Promise<SequenceDefinition> {
@@ -343,9 +435,12 @@ export class Orch8Client implements IOrch8Client {
     return this.get<SequenceDefinition[]>(`/sequences/versions?${params}`);
   }
 
-  listSequences(filter?: Record<string, string>): Promise<SequenceDefinition[]> {
+  async listSequences(filter?: Record<string, string>): Promise<SequenceDefinition[]> {
     const params = filter ? `?${new URLSearchParams(filter)}` : "";
-    return this.get<SequenceDefinition[]>(`/sequences${params}`);
+    const result = await this.get<SequenceDefinition[] | { items: SequenceDefinition[] }>(
+      `/sequences${params}`,
+    );
+    return Array.isArray(result) ? result : result.items;
   }
 
   deleteSequence(id: string): Promise<void> {
@@ -358,23 +453,43 @@ export class Orch8Client implements IOrch8Client {
 
   // -- Instances --
 
-  createInstance(body: CreateInstanceBody): Promise<TaskInstance> {
-    return this.post<TaskInstance>("/instances", body);
+  async createInstance(body: CreateInstanceBody): Promise<TaskInstance> {
+    return this.post<TaskInstance>("/instances", this.prepareInstance(body));
   }
 
-  batchCreateInstances(
+  async batchCreateInstances(
     instances: CreateInstanceBody[],
   ): Promise<BatchCreateResponse> {
-    return this.post<BatchCreateResponse>("/instances/batch", { instances });
+    return this.post<BatchCreateResponse>("/instances/batch", {
+      instances: instances.map((instance) => this.prepareInstance(instance)),
+    });
   }
 
   getInstance(id: string): Promise<TaskInstance> {
     return this.get<TaskInstance>(`/instances/${this.e(id)}`);
   }
 
-  listInstances(filter?: Record<string, string>): Promise<TaskInstance[]> {
+  async listInstances(filter?: Record<string, string>): Promise<TaskInstance[]> {
     const params = filter ? `?${new URLSearchParams(filter)}` : "";
-    return this.get<TaskInstance[]>(`/instances${params}`);
+    const result = await this.get<TaskInstance[] | { items: TaskInstance[] }>(
+      `/instances${params}`,
+    );
+    return Array.isArray(result) ? result : result.items;
+  }
+
+  private prepareInstance(body: CreateInstanceBody): CreateInstanceBody & {
+    tenant_id: string;
+    namespace: string;
+  } {
+    const tenantId = body.tenant_id ?? this.tenantId;
+    if (!tenantId) {
+      throw new TypeError("tenant_id is required to create an instance");
+    }
+    return {
+      ...body,
+      tenant_id: tenantId,
+      namespace: body.namespace ?? this.namespace ?? "default",
+    };
   }
 
   updateInstanceState(
@@ -444,11 +559,28 @@ export class Orch8Client implements IOrch8Client {
     id: string,
     signal?: AbortSignal,
   ): AsyncGenerator<InstanceSSEEvent> {
-    const headers = await this.buildHeaders({ Accept: "text/event-stream" });
-    const res = await fetch(`${this.baseUrl}/instances/${this.e(id)}/stream`, {
+    for await (const event of this.streamInstanceEvents(id, { signal })) {
+      yield event.data;
+    }
+  }
+
+  async *streamInstanceEvents(
+    id: string,
+    options: InstanceStreamOptions = {},
+  ): AsyncGenerator<ResumableInstanceSSEEvent> {
+    const pollMs = options.pollMs === undefined
+      ? undefined
+      : Math.max(100, Math.min(options.pollMs, 5000));
+    const query = pollMs === undefined ? "" : `?${new URLSearchParams({ poll_ms: String(pollMs) })}`;
+    const path = `/instances/${this.e(id)}/stream${query}`;
+    const headers = await this.buildHeaders({
+      Accept: "text/event-stream",
+      ...(options.lastEventId ? { "Last-Event-ID": options.lastEventId } : {}),
+    });
+    const res = await fetch(`${this.baseUrl}${path}`, {
       method: "GET",
       headers,
-      signal,
+      signal: options.signal,
     });
 
     if (!res.ok) {
@@ -458,7 +590,7 @@ export class Orch8Client implements IOrch8Client {
       } catch {
         resBody = await res.text().catch(() => null);
       }
-      throw new Orch8Error(res.status, resBody, `/instances/${this.e(id)}/stream`);
+      throw new Orch8Error(res.status, resBody, path);
     }
 
     const reader = res.body?.getReader();
@@ -467,6 +599,8 @@ export class Orch8Client implements IOrch8Client {
     const decoder = new TextDecoder();
     let buffer = "";
     let eventData: string[] = [];
+    let eventId: string | undefined;
+    let eventType: string | undefined;
 
     try {
       while (true) {
@@ -478,14 +612,20 @@ export class Orch8Client implements IOrch8Client {
         buffer = lines.pop() ?? "";
 
         for (const line of lines) {
-          if (line.startsWith("data:")) {
+          if (line.startsWith("id:")) {
+            eventId = line.slice(3).trim();
+          } else if (line.startsWith("event:")) {
+            eventType = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
             eventData.push(line.slice(5).trimStart());
           } else if (line.trim() === "" && eventData.length > 0) {
             const data = eventData.join("\n");
             eventData = [];
             if (data && data !== "[DONE]") {
               try {
-                yield JSON.parse(data) as InstanceSSEEvent;
+                yield { id: eventId, event: eventType, data: JSON.parse(data) as InstanceSSEEvent };
+                eventId = undefined;
+                eventType = undefined;
               } catch {
                 // skip non-JSON
               }
@@ -497,7 +637,7 @@ export class Orch8Client implements IOrch8Client {
         const data = eventData.join("\n");
         if (data && data !== "[DONE]") {
           try {
-            yield JSON.parse(data) as InstanceSSEEvent;
+            yield { id: eventId, event: eventType, data: JSON.parse(data) as InstanceSSEEvent };
           } catch {
             // skip non-JSON
           }
@@ -664,8 +804,11 @@ export class Orch8Client implements IOrch8Client {
   heartbeatTask(
     id: string,
     body: HeartbeatTaskBody,
-  ): Promise<void> {
-    return this.requestVoid("POST", `/workers/tasks/${this.e(id)}/heartbeat`, body);
+  ): Promise<HeartbeatResponse> {
+    if (body.checkpoint !== undefined && body.checkpoint_seq === undefined) {
+      return Promise.reject(new TypeError("checkpoint_seq is required with checkpoint"));
+    }
+    return this.post<HeartbeatResponse>(`/workers/tasks/${this.e(id)}/heartbeat`, body);
   }
 
   listWorkerTasks(filter?: Record<string, string>): Promise<WorkerTask[]> {

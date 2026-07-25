@@ -35,6 +35,28 @@ afterEach(() => {
 });
 
 describe("Orch8Client", () => {
+  describe("low-level request", () => {
+    it("supports newly introduced engine routes", async () => {
+      globalThis.fetch = mockFetchJson(200, { id: "handoff-1" });
+      const result = await client.request<{ id: string }>(
+        "POST",
+        "/continuity/handoffs",
+        { execution_id: "exec-1" },
+      );
+      expect(result.id).toBe("handoff-1");
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        `${BASE}/continuity/handoffs`,
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+
+    it("rejects protocol-relative paths", async () => {
+      await expect(client.request("GET", "//untrusted.test/path")).rejects.toThrow(
+        "exactly one '/'",
+      );
+    });
+  });
+
   describe("constructor", () => {
     it("strips trailing slash from baseUrl", async () => {
       const c = new Orch8Client({ baseUrl: "https://host.com/" });
@@ -93,14 +115,27 @@ describe("Orch8Client", () => {
       expect(call[1].body).toBeUndefined();
     });
 
+    it("encodes resource IDs as path segments", async () => {
+      globalThis.fetch = mockFetchJson(200, { id: "folder/seq" });
+      await client.getSequence("folder/seq");
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(
+        `${BASE}/sequences/folder%2Fseq`,
+      );
+    });
+
     it("POST sends JSON body", async () => {
       globalThis.fetch = mockFetchJson(200, { id: "i1" });
-      await client.createInstance({ sequence_name: "test", namespace: "default" });
+      await client.createInstance({
+        sequence_id: "sequence-1",
+        tenant_id: "tenant-1",
+        namespace: "default",
+      });
       const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(call[0]).toBe(`${BASE}/instances`);
       expect(call[1].method).toBe("POST");
       expect(JSON.parse(call[1].body)).toEqual({
-        sequence_name: "test",
+        sequence_id: "sequence-1",
+        tenant_id: "tenant-1",
         namespace: "default",
       });
     });
@@ -184,6 +219,87 @@ describe("Orch8Client", () => {
     });
   });
 
+  describe("resilient transport", () => {
+    it("retries safe requests after rate limits and server errors", async () => {
+      const onRetry = vi.fn();
+      const c = new Orch8Client({
+        baseUrl: BASE,
+        retry: { maxAttempts: 3, baseDelayMs: 0, onRetry },
+      });
+      globalThis.fetch = vi.fn()
+        .mockResolvedValueOnce(mockFetchJson(429, { error: "slow down" })())
+        .mockResolvedValueOnce(mockFetchJson(503, { error: "busy" })())
+        .mockResolvedValueOnce(mockFetchJson(200, { id: "s1" })());
+
+      await expect(c.getSequence("s1")).resolves.toEqual({ id: "s1" });
+      expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+      expect(onRetry.mock.calls.map((call) => call[1])).toEqual([2, 3]);
+    });
+
+    it("does not retry unsafe requests", async () => {
+      const c = new Orch8Client({
+        baseUrl: BASE,
+        tenantId: "t1",
+        retry: { maxAttempts: 3, baseDelayMs: 0 },
+      });
+      globalThis.fetch = mockFetchJson(503, { error: "busy" });
+      await expect(c.createInstance({ sequence_id: "s1" })).rejects.toThrow(Orch8Error);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("emits observations and preserves page metadata", async () => {
+      const responses: Array<{ status?: number; attempt: number }> = [];
+      const c = new Orch8Client({
+        baseUrl: BASE,
+        onRequest: () => { throw new Error("ignored"); },
+        onResponse: (event) => responses.push(event),
+      });
+      globalThis.fetch = mockFetchJson(200, {
+        items: [{ id: "i1" }], next_cursor: "cursor-2", total: 3,
+      });
+
+      await expect(c.requestPage<{ id: string }>("/instances", { limit: "1" })).resolves.toEqual({
+        items: [{ id: "i1" }], next_cursor: "cursor-2", total: 3,
+      });
+      expect(responses).toHaveLength(1);
+      expect(responses[0]).toMatchObject({ status: 200, attempt: 1 });
+    });
+  });
+
+  describe("resumable streaming", () => {
+    it("exposes event cursors and sends the resume cursor", async () => {
+      const chunks = ['id: cursor-2\nevent: state\ndata: {"type":"done","instance_id":"i1"}\n\n'];
+      let index = 0;
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: async () => index < chunks.length
+              ? { done: false, value: new TextEncoder().encode(chunks[index++]) }
+              : { done: true, value: undefined },
+            releaseLock: () => undefined,
+          }),
+        },
+      } as unknown as Response);
+
+      const events = [];
+      for await (const event of client.streamInstanceEvents("folder/i1", {
+        lastEventId: "cursor-1",
+        pollMs: 10,
+      })) events.push(event);
+
+      expect(events).toEqual([{
+        id: "cursor-2",
+        event: "state",
+        data: { type: "done", instance_id: "i1" },
+      }]);
+      const [url, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(url).toBe(`${BASE}/instances/folder%2Fi1/stream?poll_ms=100`);
+      expect(init.headers["Last-Event-ID"]).toBe("cursor-1");
+    });
+  });
+
   describe("query parameters", () => {
     it("listSequences appends filter params", async () => {
       globalThis.fetch = mockFetchJson(200, []);
@@ -227,9 +343,20 @@ describe("Orch8Client", () => {
 
   describe("sequences API", () => {
     it("createSequence POSTs to /sequences", async () => {
-      globalThis.fetch = mockFetchJson(200, { id: "s1", name: "test" });
-      const result = await client.createSequence({ name: "test", blocks: [] });
-      expect(result).toEqual({ id: "s1", name: "test" });
+      globalThis.fetch = mockFetchJson(201, { id: "s1", warnings: [] });
+      const result = await client.createSequence({
+        name: "test",
+        tenant_id: "tenant-1",
+        blocks: [],
+      });
+      expect(result).toEqual({ id: "s1", warnings: [] });
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(JSON.parse(call[1].body)).toMatchObject({
+        tenant_id: "tenant-1",
+        namespace: "default",
+        version: 1,
+        status: "production",
+      });
     });
 
     it("listSequenceVersions builds params correctly", async () => {
@@ -252,7 +379,11 @@ describe("Orch8Client", () => {
   describe("instances API", () => {
     it("batchCreateInstances sends array in wrapper", async () => {
       globalThis.fetch = mockFetchJson(200, { created: 2 });
-      await client.batchCreateInstances([{ name: "a" }, { name: "b" }]);
+      const configured = new Orch8Client({ baseUrl: BASE, tenantId: "tenant-1" });
+      await configured.batchCreateInstances([
+        { sequence_id: "sequence-a" },
+        { sequence_id: "sequence-b" },
+      ]);
       const body = JSON.parse(
         (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body,
       );
@@ -367,10 +498,17 @@ describe("Orch8Client", () => {
     });
 
     it("heartbeatTask POSTs to correct path", async () => {
-      globalThis.fetch = mockFetchJson(200, undefined);
-      await client.heartbeatTask("t1", {});
+      globalThis.fetch = mockFetchJson(200, { checkpoint_seq: 2 });
+      const result = await client.heartbeatTask("t1", {});
       const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(call[0]).toBe(`${BASE}/workers/tasks/t1/heartbeat`);
+      expect(result).toEqual({ checkpoint_seq: 2 });
+    });
+
+    it("heartbeatTask requires a sequence with checkpoint data", async () => {
+      await expect(
+        client.heartbeatTask("t1", { checkpoint: { cursor: 1 } }),
+      ).rejects.toThrow("checkpoint_seq is required");
     });
 
     it("getWorkerTaskStats GETs correct path", async () => {

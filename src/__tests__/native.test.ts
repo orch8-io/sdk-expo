@@ -7,12 +7,15 @@ const mockNativeModule = {
   resume: vi.fn(),
   pause: vi.fn(),
   tickOnce: vi.fn(),
+  runUntilIdle: vi.fn(),
   reportPowerState: vi.fn(),
   start: vi.fn(),
   cancelInstance: vi.fn(),
   getInstance: vi.fn(),
   activeInstances: vi.fn(),
   completeStep: vi.fn(),
+  importContinuityCapsule: vi.fn(),
+  activateContinuityCapsule: vi.fn(),
   loadSequenceFromJson: vi.fn(),
   loadSequencesFromUrl: vi.fn(),
   loadedSequences: vi.fn(),
@@ -88,12 +91,21 @@ describe("NativeEngine", () => {
       { name: "resume", call: (e) => e.resume() },
       { name: "pause", call: (e) => e.pause() },
       { name: "tickOnce", call: (e) => e.tickOnce() },
+      { name: "runUntilIdle", call: (e) => e.runUntilIdle() },
       { name: "reportPowerState", call: (e) => e.reportPowerState("active") },
       { name: "start", call: (e) => e.start("seq") },
       { name: "cancelInstance", call: (e) => e.cancelInstance("id") },
       { name: "getInstance", call: (e) => e.getInstance("id") },
       { name: "activeInstances", call: (e) => e.activeInstances() },
       { name: "completeStep", call: (e) => e.completeStep("id", "step") },
+      {
+        name: "importContinuityCapsule",
+        call: (e) => e.importContinuityCapsule("{}", "payload", "key", "runtime", "instance"),
+      },
+      {
+        name: "activateContinuityCapsule",
+        call: (e) => e.activateContinuityCapsule("capsule", "runtime", "instance"),
+      },
       { name: "loadSequenceFromJson", call: (e) => e.loadSequenceFromJson("{}") },
       { name: "loadSequencesFromUrl", call: (e) => e.loadSequencesFromUrl("http://x") },
       { name: "loadedSequences", call: (e) => e.loadedSequences() },
@@ -168,6 +180,36 @@ describe("NativeEngine", () => {
       );
     });
 
+    it("importContinuityCapsule() serializes a capsule object", () => {
+      const result = { capsuleId: "cap-1", continuityId: "cont-1" };
+      mockNativeModule.importContinuityCapsule.mockReturnValue(result);
+      expect(
+        engine.importContinuityCapsule(
+          { capsule_id: "cap-1" },
+          "payload",
+          "key",
+          "runtime-2",
+          "instance-2",
+        ),
+      ).toBe(result);
+      expect(mockNativeModule.importContinuityCapsule).toHaveBeenCalledWith(
+        '{"capsule_id":"cap-1"}',
+        "payload",
+        "key",
+        "runtime-2",
+        "instance-2",
+      );
+    });
+
+    it("activateContinuityCapsule() forwards ownership identifiers", () => {
+      engine.activateContinuityCapsule("cap-1", "runtime-2", "instance-2");
+      expect(mockNativeModule.activateContinuityCapsule).toHaveBeenCalledWith(
+        "cap-1",
+        "runtime-2",
+        "instance-2",
+      );
+    });
+
     it("loadSequenceFromJson() passes string through", () => {
       engine.loadSequenceFromJson('{"name":"test"}');
       expect(mockNativeModule.loadSequenceFromJson).toHaveBeenCalledWith('{"name":"test"}');
@@ -203,6 +245,25 @@ describe("NativeEngine", () => {
       const result = { stepsExecuted: 3, instancesCompleted: 1 };
       mockNativeModule.tickOnce.mockReturnValue(result);
       expect(engine.tickOnce()).toEqual(result);
+    });
+
+    it("runUntilIdle() forwards bounded background defaults", () => {
+      const result = {
+        ticksExecuted: 2,
+        instancesAdvanced: 1,
+        stepsExecuted: 3,
+        hasPendingWork: false,
+        budgetExhausted: false,
+      };
+      mockNativeModule.runUntilIdle.mockReturnValue(result);
+      expect(engine.runUntilIdle()).toEqual(result);
+      expect(mockNativeModule.runUntilIdle).toHaveBeenCalledWith(25, 20_000);
+    });
+
+    it("runUntilIdle() validates budgets before crossing the bridge", () => {
+      expect(() => engine.runUntilIdle(0, 1_000)).toThrow("maxTicks");
+      expect(() => engine.runUntilIdle(1, 0)).toThrow("timeBudgetMs");
+      expect(mockNativeModule.runUntilIdle).not.toHaveBeenCalled();
     });
 
     it("reportPowerState() forwards state", () => {
