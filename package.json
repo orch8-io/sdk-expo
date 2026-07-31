@@ -28,7 +28,11 @@
   "keywords": ["orch8", "workflow", "orchestration", "expo", "react-native", "mobile"],
   "repository": {
     "type": "git",
-    "url": "https://github.com/orch8-io/sdk-expo"
+    "url": "git+https://github.com/orch8-io/sdk-expo.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "license": "MIT",
   "peerDependencies": {
