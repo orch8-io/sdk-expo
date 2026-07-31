@@ -2,7 +2,7 @@
 
 Expo and React Native SDK for the Orch8 REST API and on-device engine.
 
-Version 0.3 supports the current Orch8 0.7-dev sequence and resumable-worker response
+Version 0.7 supports the Orch8 0.7 sequence and resumable-worker response
 contract. It also exposes portable continuity capsule import and activation on
 iOS and Android. Capsule export deliberately remains a native-host concern
 because the engine requires a non-exportable Secure Enclave or KeyStore signer.
