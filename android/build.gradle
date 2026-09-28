@@ -7,6 +7,20 @@ apply plugin: 'com.android.library'
 def packageJson = new groovy.json.JsonSlurper().parse(file("${projectDir}/../package.json"))
 def orch8NativeVersion = packageJson.orch8NativeVersion
 
+// The runtime node / worker API exists in io.orch8:orch8-mobile after 0.7.1.
+// Compile src/runtimeNode only when the pinned AAR has it, so the module still
+// builds against the published 0.7.1 AAR (src/runtimeNodeUnavailable).
+def versionAtLeast = { String v, String min ->
+    def parse = { String s -> s.tokenize('-')[0].tokenize('.').collect { it.isInteger() ? (it as int) : 0 } + [0, 0, 0] }
+    def a = parse(v)
+    def b = parse(min)
+    for (int i = 0; i < 3; i++) {
+        if (a[i] != b[i]) return a[i] > b[i]
+    }
+    return true
+}
+def runtimeNodeEnabled = versionAtLeast(orch8NativeVersion, packageJson.orch8RuntimeNodeMinVersion)
+
 group = 'io.orch8.expo'
 version = packageJson.version
 
@@ -35,6 +49,11 @@ android {
     }
     lint {
         abortOnError false
+    }
+    sourceSets {
+        main {
+            java.srcDirs += runtimeNodeEnabled ? 'src/runtimeNode/java' : 'src/runtimeNodeUnavailable/java'
+        }
     }
 }
 

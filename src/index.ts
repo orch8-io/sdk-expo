@@ -4,7 +4,7 @@ export type { IOrch8Client } from "./client.js";
 export { ORCH8_API_VERSION, ORCH8_ROUTES } from "./generated/routes.js";
 
 // Native engine bridge
-export { NativeEngine } from "./native.js";
+export { NativeEngine, PermanentHandlerError, parseTaskContext } from "./native.js";
 export type { NativeEngineEvent } from "./native.js";
 
 // Provider & context
@@ -127,5 +127,15 @@ export type {
   NativeSequenceInfo,
   NativeSyncResult,
   NativeContinuityImportResult,
+  NativeNodeConnectivity,
+  NativeNodeCapabilities,
+  NativeNodeRegistration,
+  NativeWorkerOptions,
+  NativeWorkerStats,
+  NativeWorkerWindowResult,
+  NativePushWakeEnvelope,
+  NativeTaskContext,
+  NativeHandlerContext,
+  NativeAsyncHandler,
   InstanceBase,
 } from "./types.js";

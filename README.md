@@ -36,6 +36,51 @@ The config plugin adds Orch8's Maven repository to the Android project
 deployment target to 16.0 if it is lower. The native module requires a
 development build or a prebuilt app; it does not run in Expo Go.
 
+## Awaited handlers
+
+`NativeEngine.registerHandler(name)` is fire-and-forget: the native side emits
+`handlerInvoked` and completes the step with `{}` at once.
+`registerAsyncHandler(name, handler)` instead makes the engine thread wait for
+your handler's result (up to `handlerTimeoutMs`) and records it as the step
+output. Throw `PermanentHandlerError` to fail without retry. This works with
+the 0.7.1 engine.
+
+```typescript
+engine.registerAsyncHandler("scan_document", async (params, ctx) => {
+  const result = await scan(JSON.parse(params), { idempotencyKey: ctx.task?.effectId });
+  return { pages: result.pages };
+});
+```
+
+## Runtime node (Orch8 engine after 0.7.1)
+
+The device can join the distributed-execution mesh as a runtime of kind
+`mobile` and run server-placed steps with its awaited handlers. The published
+`Orch8Mobile` 0.7.1 pod and `orch8-mobile` 0.7.1 AAR do not contain this API,
+so it is compiled only when `orch8NativeVersion` is at least
+`orch8RuntimeNodeMinVersion` (0.7.2) in `package.json`: the podspec defines the
+`ORCH8_RUNTIME_NODE` Swift condition and `android/build.gradle` adds
+`src/runtimeNode` instead of `src/runtimeNodeUnavailable`. Builds against 0.7.1
+keep working; `engine.runtimeNodeAvailable` is `false` and the calls reject
+with a message naming the required engine version.
+
+```typescript
+if (engine.runtimeNodeAvailable) {
+  engine.registerAsyncHandler("scan_document", scanHandler);
+  await engine.registerNode({ hardware: ["camera"], pushToken });
+  await engine.startWorker({ maxConcurrentTasks: 1 });
+  // Silent push (id-only wake hint):
+  await engine.onPushWake(notification.request.content.data);
+  // Expo BackgroundTask window:
+  await engine.runWorkerWindow(25_000);
+}
+```
+
+Also: `nodeRuntimeId()`, `updateNodeStatus(connectivity, batteryPercent)`,
+`workerStats()`, `stopWorker()`, `unregisterNode()`, and
+`enableBuiltin("http_request")`. Remote tasks carry `__orch8` in their params;
+`ctx.task.effectId` is the server's idempotency key for the step's effect.
+
 New or experimental REST routes can be called with the authenticated low-level
 client:
 

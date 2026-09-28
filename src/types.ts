@@ -705,6 +705,110 @@ export interface NativeSyncResult {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime node / worker (native engine after 0.7.1; see
+// `NativeEngine.runtimeNodeAvailable`)
+// ---------------------------------------------------------------------------
+
+export type NativeNodeConnectivity = "offline" | "metered" | "wifi" | "ethernet";
+
+/** What this device offers the distributed-execution mesh. */
+export interface NativeNodeCapabilities {
+  /** Handlers served remotely. Empty = every handler registered on the engine. */
+  handlers?: string[];
+  regions?: string[];
+  /** Free-form hardware facts (`camera`, `nfc`, …). `device:<deviceId>` is always added. */
+  hardware?: string[];
+  plugins?: string[];
+  /** Credential binding *names* available on the device (never secrets). */
+  credentials?: string[];
+  offlineCapable?: boolean;
+  connectivity?: NativeNodeConnectivity;
+  /** 0–100. */
+  batteryPercent?: number;
+  /** `ios` / `android`; inferred natively when absent. */
+  platform?: string;
+  /** APNs/FCM token used for id-only wake-up hints. */
+  pushToken?: string;
+  appVersion?: string;
+  /** Overrides the API base derived from `syncUrl`. */
+  apiBaseUrl?: string;
+  capsuleSigningPublicKey?: string;
+}
+
+export interface NativeNodeRegistration {
+  runtimeId: string;
+  deviceId: string;
+  handlers: string[];
+  expiresAt: string;
+}
+
+export interface NativeWorkerOptions {
+  /** Remote tasks executed concurrently (default 1). */
+  maxConcurrentTasks?: number;
+  /** Idle poll cadence before power-state scaling (default 15000). */
+  idlePollIntervalMs?: number;
+  version?: string;
+}
+
+export interface NativeWorkerStats {
+  running: boolean;
+  inFlight: number;
+  claimed: number;
+  completed: number;
+  failed: number;
+  released: number;
+  lost: number;
+}
+
+export interface NativeWorkerWindowResult {
+  claimed: number;
+  completed: number;
+  failed: number;
+  stillRunning: number;
+  budgetExhausted: boolean;
+}
+
+/** Id-only push wake hint. Never carries params. */
+export interface NativePushWakeEnvelope {
+  task_id?: string;
+  runtime_id?: string;
+  reason?: string;
+}
+
+/**
+ * Remote-task metadata the worker loop adds to handler params as `__orch8`
+ * (absent for steps started on-device).
+ */
+export interface NativeTaskContext {
+  /** Server idempotency key for the step's effect; null on pre-contract servers. */
+  effectId: string | null;
+  taskId: string | null;
+  instanceId: string | null;
+  blockId: string | null;
+  attempt: number | null;
+  runtimeId: string | null;
+  continuityEpoch: number | null;
+  resumeCheckpoint: unknown;
+}
+
+export interface NativeHandlerContext {
+  stepName: string;
+  handlerName: string;
+  /** Parsed `params.__orch8`, or null for steps started on-device. */
+  task: NativeTaskContext | null;
+}
+
+/**
+ * Awaited JS step handler (`NativeEngine.registerAsyncHandler`). `params` is
+ * the raw params JSON. Return a JSON string or a serialisable value; throw
+ * `PermanentHandlerError` to fail without retry.
+ */
+export type NativeAsyncHandler = (
+  params: string,
+  context: NativeHandlerContext,
+) => Promise<unknown> | unknown;
+
+// ---------------------------------------------------------------------------
 // Common instance type bridging native and remote layers
 // ---------------------------------------------------------------------------
 

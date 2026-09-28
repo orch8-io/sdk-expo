@@ -8,6 +8,12 @@ package = JSON.parse(File.read(File.join(__dir__, '..', 'package.json')))
 # engine version can change record fields or FFI checksums.
 orch8_native_version = package.fetch('orch8NativeVersion')
 
+# The runtime node / worker API (registerNode, startWorker, ...) is compiled
+# only when the pinned engine has it; the published 0.7.1 pod predates it.
+# Bumping orch8NativeVersion to orch8RuntimeNodeMinVersion or later turns it on.
+runtime_node = Gem::Version.new(orch8_native_version) >=
+               Gem::Version.new(package.fetch('orch8RuntimeNodeMinVersion'))
+
 Pod::Spec.new do |s|
   s.name           = 'Orch8Expo'
   s.version        = package['version']
@@ -29,6 +35,9 @@ Pod::Spec.new do |s|
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
   }
+  if runtime_node
+    s.pod_target_xcconfig['SWIFT_ACTIVE_COMPILATION_CONDITIONS'] = '$(inherited) ORCH8_RUNTIME_NODE'
+  end
 
   s.source_files = '**/*.{h,m,mm,swift}'
 end

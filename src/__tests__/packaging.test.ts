@@ -13,6 +13,7 @@ const read = (path: string) => readFileSync(new URL(path, root), "utf8");
 const pkg = JSON.parse(read("package.json")) as {
   version: string;
   orch8NativeVersion: string;
+  orch8RuntimeNodeMinVersion: string;
   files: string[];
   exports: Record<string, unknown>;
 };
@@ -55,6 +56,28 @@ describe("native distribution", () => {
     expect(read("android/src/main/java/io/orch8/expo/Orch8ExpoModule.kt")).toContain(
       `ORCH8_EXPO_SDK_VERSION = "expo-${pkg.version}"`,
     );
+  });
+
+  it("compiles the runtime node API only against an engine that has it", () => {
+    expect(pkg.orch8RuntimeNodeMinVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    const podspec = read("ios/Orch8Expo.podspec");
+    expect(podspec).toContain("package.fetch('orch8RuntimeNodeMinVersion')");
+    expect(podspec).toContain("ORCH8_RUNTIME_NODE");
+    const swift = read("ios/Orch8ExpoModule.swift");
+    expect(swift).toContain("#if ORCH8_RUNTIME_NODE");
+    expect(swift.indexOf('AsyncFunction("registerNode")')).toBeGreaterThan(swift.indexOf("#if ORCH8_RUNTIME_NODE"));
+
+    const gradle = read("android/build.gradle");
+    expect(gradle).toContain("packageJson.orch8RuntimeNodeMinVersion");
+    expect(gradle).toContain("'src/runtimeNode/java' : 'src/runtimeNodeUnavailable/java'");
+    expect(read("android/src/runtimeNode/java/io/orch8/expo/RuntimeNodeDefinitions.kt")).toContain(
+      "RUNTIME_NODE_AVAILABLE = true",
+    );
+    expect(read("android/src/runtimeNodeUnavailable/java/io/orch8/expo/RuntimeNodeDefinitions.kt")).toContain(
+      "RUNTIME_NODE_AVAILABLE = false",
+    );
+    const native = read("src/native.ts");
+    expect(native).toContain(`RUNTIME_NODE_MIN_NATIVE_VERSION = "${pkg.orch8RuntimeNodeMinVersion}"`);
   });
 
   it("publishes every native file and the config plugin", () => {

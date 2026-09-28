@@ -4,11 +4,16 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.exception.CodedException
 import io.orch8.mobile.DeviceContext
+import io.orch8.mobile.HandlerException
 import io.orch8.mobile.MobileEngine
 import io.orch8.mobile.MobileEngineConfig
 import io.orch8.mobile.PowerState
 import io.orch8.mobile.StepHandler
 import io.orch8.mobile.InstanceStateKind
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /** Reported to the engine as `sdkVersion`; kept equal to package.json `version`. */
 internal const val ORCH8_EXPO_SDK_VERSION = "expo-0.7.1"
@@ -25,10 +30,17 @@ private fun Map<String, Any?>.ulong(key: String, default: ULong): ULong =
 class Orch8ExpoModule : Module() {
     private var engine: MobileEngine? = null
 
+    @Volatile private var handlerTimeoutMs: Long = 30_000
+    internal val pendingHandlers = PendingHandlerCalls()
+
     override fun definition() = ModuleDefinition {
         Name("Orch8ExpoModule")
 
         Events("onEngineEvent")
+
+        // Whether the runtime node / worker functions below exist in this build
+        // (src/runtimeNode vs src/runtimeNodeUnavailable, chosen by build.gradle).
+        Constants("runtimeNodeAvailable" to RUNTIME_NODE_AVAILABLE)
 
         Function("createEngine") { dbPath: String, config: Map<String, Any?> ->
             val cfg = MobileEngineConfig(
@@ -54,12 +66,25 @@ class Orch8ExpoModule : Module() {
                 syncApiKey = config["syncApiKey"] as? String ?: "",
             )
             engine = MobileEngine(dbPath, cfg)
+            handlerTimeoutMs = cfg.handlerTimeoutMs.toLong()
         }
 
         Function("destroyEngine") {
             engine?.pause()
             engine = null
+            pendingHandlers.failAll("engine destroyed")
             Unit
+        }
+
+        // Awaited handler: blocks the engine thread until JS calls
+        // resolveHandler (or handlerTimeoutMs elapses). Works with any engine.
+        Function("registerAsyncHandler") { name: String ->
+            val eng = engine ?: throw EngineNotInitialized()
+            eng.registerHandler(name, ExpoAsyncStepHandler(this@Orch8ExpoModule, name, handlerTimeoutMs))
+        }
+
+        Function("resolveHandler") { requestId: String, output: String?, error: String?, permanent: Boolean ->
+            pendingHandlers.resolve(requestId, output, error, permanent)
         }
 
         Function("registerHandler") { name: String ->
@@ -233,6 +258,8 @@ class Orch8ExpoModule : Module() {
                 "dropped" to result.dropped.toLong(),
             )
         }
+
+        runtimeNodeDefinitions { engine ?: throw EngineNotInitialized() }
     }
 
     private fun stateKindString(state: InstanceStateKind): String = when (state) {
@@ -263,6 +290,69 @@ private class ExpoStepHandler(
             "params" to input,
         ))
         return "{}"
+    }
+}
+
+/** Outstanding native-to-JS handler calls, keyed by request id. */
+internal class PendingHandlerCalls {
+    class Outcome(val output: String?, val error: String?, val permanent: Boolean)
+
+    private class Slot {
+        val latch = CountDownLatch(1)
+
+        @Volatile var outcome: Outcome? = null
+    }
+
+    private val slots = ConcurrentHashMap<String, Slot>()
+
+    fun open(id: String) {
+        slots[id] = Slot()
+    }
+
+    fun await(id: String, timeoutMs: Long): Outcome? {
+        val slot = slots[id] ?: return null
+        val done = slot.latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        slots.remove(id)
+        return if (done) slot.outcome else null
+    }
+
+    fun resolve(id: String, output: String?, error: String?, permanent: Boolean) {
+        val slot = slots[id] ?: return
+        synchronized(slot) {
+            if (slot.outcome != null) return
+            slot.outcome = Outcome(output, error, permanent)
+        }
+        slot.latch.countDown()
+    }
+
+    fun failAll(message: String) {
+        for (id in slots.keys.toList()) resolve(id, null, message, false)
+    }
+}
+
+// Emits `handlerRequest` and blocks the engine thread until JS answers with
+// `resolveHandler` or handlerTimeoutMs elapses (retryable failure).
+private class ExpoAsyncStepHandler(
+    private val module: Orch8ExpoModule,
+    private val handlerName: String,
+    private val timeoutMs: Long,
+) : StepHandler {
+    override fun execute(stepName: String, input: String): String {
+        val requestId = UUID.randomUUID().toString()
+        module.pendingHandlers.open(requestId)
+        module.sendEvent("onEngineEvent", mapOf(
+            "type" to "handlerRequest",
+            "requestId" to requestId,
+            "stepName" to stepName,
+            "handlerName" to handlerName,
+            "params" to input,
+        ))
+        val outcome = module.pendingHandlers.await(requestId, timeoutMs)
+            ?: throw HandlerException.Retryable("JS handler '$handlerName' timed out after $timeoutMs ms")
+        outcome.error?.let { message ->
+            throw if (outcome.permanent) HandlerException.Permanent(message) else HandlerException.Retryable(message)
+        }
+        return outcome.output ?: "{}"
     }
 }
 

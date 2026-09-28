@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `NativeEngine.registerAsyncHandler(name, handler)`: the native engine thread
+  waits for the JS handler's result (up to `handlerTimeoutMs`) instead of
+  completing the step with `{}`. `PermanentHandlerError` fails without retry;
+  the handler context carries `task` (the parsed `__orch8` member, including
+  `effectId`). Works with engine 0.7.1.
+- Runtime node / worker API: `registerNode`, `updateNodeStatus`,
+  `unregisterNode`, `nodeRuntimeId`, `startWorker`, `stopWorker`,
+  `runWorkerWindow`, `workerStats`, `onPushWake`, `enableBuiltin`, with
+  TypeScript types. It needs an engine newer than 0.7.1, so it is compiled only
+  when `orch8NativeVersion` >= `orch8RuntimeNodeMinVersion` (0.7.2): the
+  podspec sets the `ORCH8_RUNTIME_NODE` Swift condition and the Gradle build
+  picks `src/runtimeNode` over `src/runtimeNodeUnavailable`. Against 0.7.1,
+  `runtimeNodeAvailable` is `false` and the calls reject with a clear error.
+
 ## 0.7.1
 
 Aligned with Orch8 engine 0.7.1. This release fixes native builds; 0.7.0 could

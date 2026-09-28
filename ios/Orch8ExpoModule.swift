@@ -1,16 +1,33 @@
 import ExpoModulesCore
+import Foundation
 import Orch8Mobile
 
 /// Reported to the engine as `sdkVersion`; kept equal to package.json `version`.
 let orch8ExpoSdkVersion = "expo-0.7.1"
 
+/// The runtime node / worker API (`registerNode`, `startWorker`, ...) exists
+/// in Orch8Mobile after 0.7.1. Orch8Expo.podspec defines ORCH8_RUNTIME_NODE
+/// when `orch8NativeVersion` >= `orch8RuntimeNodeMinVersion` (package.json),
+/// so the module still compiles against the published 0.7.1 pod.
+#if ORCH8_RUNTIME_NODE
+let orch8RuntimeNodeAvailable = true
+#else
+let orch8RuntimeNodeAvailable = false
+#endif
+
 public class Orch8ExpoModule: Module {
     private var engine: MobileEngine?
+    private var handlerTimeoutMs: UInt64 = 30_000
+    let pendingHandlers = PendingHandlerCalls()
 
     public func definition() -> ModuleDefinition {
         Name("Orch8ExpoModule")
 
         Events("onEngineEvent")
+
+        Constants([
+            "runtimeNodeAvailable": orch8RuntimeNodeAvailable,
+        ])
 
         Function("createEngine") { (dbPath: String, config: [String: Any]) in
             let cfg = MobileEngineConfig(
@@ -36,6 +53,7 @@ public class Orch8ExpoModule: Module {
                 syncApiKey: config["syncApiKey"] as? String ?? ""
             )
             self.engine = try MobileEngine(dbPath: dbPath, config: cfg)
+            self.handlerTimeoutMs = cfg.handlerTimeoutMs
         }
 
         Function("destroyEngine") {
@@ -43,12 +61,27 @@ public class Orch8ExpoModule: Module {
                 eng.pause()
             }
             self.engine = nil
+            self.pendingHandlers.failAll("engine destroyed")
         }
 
         Function("registerHandler") { (name: String) in
             guard let eng = self.engine else { throw EngineNotInitialized() }
             let handler = ExpoStepHandler(module: self, handlerName: name)
             try eng.registerHandler(name: name, handler: handler)
+        }
+
+        // Awaited handler: blocks the engine thread until JS calls
+        // resolveHandler (or handlerTimeoutMs elapses). Works with any engine.
+        Function("registerAsyncHandler") { (name: String) in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            try eng.registerHandler(
+                name: name,
+                handler: ExpoAsyncStepHandler(module: self, handlerName: name, timeoutMs: self.handlerTimeoutMs)
+            )
+        }
+
+        Function("resolveHandler") { (requestId: String, output: String?, error: String?, permanent: Bool) in
+            self.pendingHandlers.resolve(requestId, output: output, error: error, permanent: permanent)
         }
 
         Function("resume") {
@@ -218,7 +251,115 @@ public class Orch8ExpoModule: Module {
                 "dropped": result.dropped,
             ]
         }
+
+        #if ORCH8_RUNTIME_NODE
+        AsyncFunction("nodeRuntimeId") { () -> String in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            return try eng.nodeRuntimeId()
+        }
+
+        AsyncFunction("registerNode") { (caps: [String: Any]) -> [String: Any] in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            let r = try eng.registerNode(capabilities: NodeCapabilities(
+                handlers: caps["handlers"] as? [String] ?? [],
+                regions: caps["regions"] as? [String] ?? [],
+                hardware: caps["hardware"] as? [String] ?? [],
+                plugins: caps["plugins"] as? [String] ?? [],
+                credentials: caps["credentials"] as? [String] ?? [],
+                offlineCapable: caps["offlineCapable"] as? Bool ?? true,
+                connectivity: Self.connectivity(caps["connectivity"] as? String),
+                batteryPercent: (caps["batteryPercent"] as? Int).map { UInt8(clamping: $0) },
+                platform: caps["platform"] as? String ?? "ios",
+                pushToken: caps["pushToken"] as? String,
+                appVersion: caps["appVersion"] as? String,
+                apiBaseUrl: caps["apiBaseUrl"] as? String,
+                capsuleSigningPublicKey: caps["capsuleSigningPublicKey"] as? String
+            ))
+            return [
+                "runtimeId": r.runtimeId,
+                "deviceId": r.deviceId,
+                "handlers": r.handlers,
+                "expiresAt": r.expiresAt,
+            ]
+        }
+
+        AsyncFunction("updateNodeStatus") { (connectivity: String?, batteryPercent: Int?) in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            try eng.updateNodeStatus(
+                connectivity: Self.connectivity(connectivity),
+                batteryPercent: batteryPercent.map { UInt8(clamping: $0) }
+            )
+        }
+
+        AsyncFunction("unregisterNode") {
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            eng.unregisterNode()
+        }
+
+        AsyncFunction("startWorker") { (options: [String: Any]) in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            try eng.startWorker(options: WorkerOptions(
+                maxConcurrentTasks: UInt32(clamping: options["maxConcurrentTasks"] as? Int ?? 1),
+                idlePollIntervalMs: UInt64(clamping: options["idlePollIntervalMs"] as? Int ?? 15000),
+                version: options["version"] as? String
+            ))
+        }
+
+        AsyncFunction("stopWorker") {
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            eng.stopWorker()
+        }
+
+        AsyncFunction("runWorkerWindow") { (timeBudgetMs: Int) -> [String: Any] in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            guard timeBudgetMs > 0 else { throw InvalidBackgroundBudget() }
+            let r = try eng.runWorkerWindow(timeBudgetMs: UInt64(timeBudgetMs))
+            return [
+                "claimed": Int(clamping: r.claimed),
+                "completed": Int(clamping: r.completed),
+                "failed": Int(clamping: r.failed),
+                "stillRunning": Int(r.stillRunning),
+                "budgetExhausted": r.budgetExhausted,
+            ]
+        }
+
+        AsyncFunction("workerStats") { () -> [String: Any] in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            let s = eng.workerStats()
+            return [
+                "running": s.running,
+                "inFlight": Int(s.inFlight),
+                "claimed": Int(clamping: s.claimed),
+                "completed": Int(clamping: s.completed),
+                "failed": Int(clamping: s.failed),
+                "released": Int(clamping: s.released),
+                "lost": Int(clamping: s.lost),
+            ]
+        }
+
+        AsyncFunction("onPushWake") { (envelopeJson: String) -> Bool in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            return eng.onPushWake(envelopeJson: envelopeJson)
+        }
+
+        Function("enableBuiltin") { (name: String) in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            try eng.enableBuiltin(name: name)
+        }
+        #endif
     }
+
+    #if ORCH8_RUNTIME_NODE
+    private static func connectivity(_ value: String?) -> NodeConnectivity? {
+        switch value {
+        case "offline": return .offline
+        case "metered": return .metered
+        case "wifi": return .wifi
+        case "ethernet": return .ethernet
+        default: return nil
+        }
+    }
+    #endif
 
     private static func stateKindString(_ state: InstanceStateKind) -> String {
         switch state {
@@ -255,6 +396,90 @@ class ExpoStepHandler: StepHandler {
             "params": input,
         ])
         return "{}"
+    }
+}
+
+/// Outstanding native-to-JS handler calls, keyed by request id.
+final class PendingHandlerCalls: @unchecked Sendable {
+    struct Outcome {
+        let output: String?
+        let error: String?
+        let permanent: Bool
+    }
+
+    private final class Slot {
+        let semaphore = DispatchSemaphore(value: 0)
+        var outcome: Outcome?
+    }
+
+    private let lock = NSLock()
+    private var slots: [String: Slot] = [:]
+
+    func open(_ id: String) {
+        lock.lock(); slots[id] = Slot(); lock.unlock()
+    }
+
+    func wait(_ id: String, timeoutMs: UInt64) -> Outcome? {
+        lock.lock(); let slot = slots[id]; lock.unlock()
+        guard let slot else { return nil }
+        let result = slot.semaphore.wait(timeout: .now() + .milliseconds(Int(min(timeoutMs, UInt64(Int32.max)))))
+        lock.lock()
+        slots.removeValue(forKey: id)
+        let outcome = slot.outcome
+        lock.unlock()
+        return result == .success ? outcome : nil
+    }
+
+    func resolve(_ id: String, output: String?, error: String?, permanent: Bool) {
+        lock.lock()
+        guard let slot = slots[id], slot.outcome == nil else { lock.unlock(); return }
+        slot.outcome = Outcome(output: output, error: error, permanent: permanent)
+        lock.unlock()
+        slot.semaphore.signal()
+    }
+
+    func failAll(_ message: String) {
+        lock.lock()
+        let open = slots.values.filter { $0.outcome == nil }
+        for slot in open { slot.outcome = Outcome(output: nil, error: message, permanent: false) }
+        lock.unlock()
+        for slot in open { slot.semaphore.signal() }
+    }
+}
+
+/// Emits `handlerRequest` and blocks the engine thread until JS answers with
+/// `resolveHandler` or `handlerTimeoutMs` elapses (retryable failure).
+final class ExpoAsyncStepHandler: StepHandler, @unchecked Sendable {
+    private weak var module: Orch8ExpoModule?
+    private let handlerName: String
+    private let timeoutMs: UInt64
+
+    init(module: Orch8ExpoModule, handlerName: String, timeoutMs: UInt64) {
+        self.module = module
+        self.handlerName = handlerName
+        self.timeoutMs = timeoutMs
+    }
+
+    func execute(stepName: String, input: String) throws -> String {
+        guard let module else { throw HandlerError.Retryable(message: "Expo module released") }
+        let requestId = UUID().uuidString
+        module.pendingHandlers.open(requestId)
+        module.sendEvent("onEngineEvent", [
+            "type": "handlerRequest",
+            "requestId": requestId,
+            "stepName": stepName,
+            "handlerName": handlerName,
+            "params": input,
+        ])
+        guard let outcome = module.pendingHandlers.wait(requestId, timeoutMs: timeoutMs) else {
+            throw HandlerError.Retryable(message: "JS handler '\(handlerName)' timed out after \(timeoutMs) ms")
+        }
+        if let error = outcome.error {
+            throw outcome.permanent
+                ? HandlerError.Permanent(message: error)
+                : HandlerError.Retryable(message: error)
+        }
+        return outcome.output ?? "{}"
     }
 }
 
