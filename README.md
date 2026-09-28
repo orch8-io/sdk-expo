@@ -1,4 +1,4 @@
-# @orch8/expo
+# @orch8.io/expo
 
 Expo and React Native SDK for the Orch8 REST API and on-device engine.
 
@@ -6,6 +6,35 @@ Version 0.7 supports the Orch8 0.7 sequence and resumable-worker response
 contract. It also exposes portable continuity capsule import and activation on
 iOS and Android. Capsule export deliberately remains a native-host concern
 because the engine requires a non-exportable Secure Enclave or KeyStore signer.
+
+## Install
+
+```bash
+npx expo install @orch8.io/expo
+```
+
+Add the config plugin to `app.json` (or `app.config.js`), then prebuild:
+
+```json
+{ "expo": { "plugins": ["@orch8.io/expo"] } }
+```
+
+```bash
+npx expo prebuild        # or: eas build --profile development
+```
+
+The on-device engine is not bundled in this package. It is resolved at build
+time, pinned to the engine version in `package.json` (`orch8NativeVersion`):
+
+| Platform | Dependency | Source |
+|---|---|---|
+| iOS 16.0+ | `Orch8Mobile` CocoaPod | CocoaPods trunk |
+| Android API 24+ | `io.orch8:orch8-mobile` AAR | `https://raw.githubusercontent.com/orch8-io/maven/main` |
+
+The config plugin adds Orch8's Maven repository to the Android project
+(`android.extraMavenRepos` in `android/gradle.properties`) and raises the iOS
+deployment target to 16.0 if it is lower. The native module requires a
+development build or a prebuilt app; it does not run in Expo Go.
 
 New or experimental REST routes can be called with the authenticated low-level
 client:
@@ -60,3 +89,6 @@ npm install
 npm run build
 npm test
 ```
+
+`example/` is a minimal Expo app used by the `native-build` workflow to prove
+the packed tarball builds on iOS and Android. See `example/README.md`.

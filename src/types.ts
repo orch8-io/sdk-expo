@@ -691,8 +691,17 @@ export interface NativeSequenceInfo {
 }
 
 export interface NativeSyncResult {
+  /** Sequences added or updated by this sync (`added + updated`). */
   sequencesUpdated: number;
+  /** Sequences removed by this sync. */
   sequencesRemoved: number;
+  added: number;
+  updated: number;
+  removed: number;
+  /** Manifest entries left unchanged. */
+  skipped: number;
+  /** Manifest entries rejected because their signature did not verify. */
+  signatureFailures: number;
 }
 
 // ---------------------------------------------------------------------------

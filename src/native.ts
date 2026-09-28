@@ -42,7 +42,7 @@ interface Orch8NativeModule {
   loadedSequences(): NativeSequenceInfo[];
   sync(manifestUrl: string): Promise<NativeSyncResult>;
   setDeviceContext(deviceId: string, osName: string, osVersion: string, appVersion: string): void;
-  flushTelemetry(endpoint: string): Promise<{ eventsFlushed: number; bytesSent: number }>;
+  flushTelemetry(endpoint: string): Promise<{ eventsFlushed: number; dropped: number }>;
 }
 
 const NativeModule = requireNativeModule<Orch8NativeModule>("Orch8ExpoModule");
@@ -52,7 +52,16 @@ export type NativeEngineEvent =
   | { type: "instanceCompleted"; instanceId: string; sequenceName: string }
   | { type: "instanceFailed"; instanceId: string; error: string }
   | { type: "instanceCancelled"; instanceId: string }
-  | { type: "handlerInvoked"; instanceId: string; handlerName: string; params: string };
+  | {
+      type: "handlerInvoked";
+      /** Name of the step whose handler ran. */
+      stepName: string;
+      /** @deprecated Carries the step name, not an instance ID. Use `stepName`. */
+      instanceId: string;
+      handlerName: string;
+      /** The step's input JSON. */
+      params: string;
+    };
 
 type EngineEventsMap = {
   onEngineEvent: (event: NativeEngineEvent) => void;
@@ -226,7 +235,7 @@ export class NativeEngine {
     NativeModule.setDeviceContext(deviceId, osName, osVersion, appVersion);
   }
 
-  flushTelemetry(endpoint: string): Promise<{ eventsFlushed: number; bytesSent: number }> {
+  flushTelemetry(endpoint: string): Promise<{ eventsFlushed: number; dropped: number }> {
     this.assertReady();
     return NativeModule.flushTelemetry(endpoint);
   }

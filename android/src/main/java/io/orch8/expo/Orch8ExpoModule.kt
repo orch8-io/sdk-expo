@@ -3,11 +3,24 @@ package io.orch8.expo
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.exception.CodedException
+import io.orch8.mobile.DeviceContext
 import io.orch8.mobile.MobileEngine
 import io.orch8.mobile.MobileEngineConfig
 import io.orch8.mobile.PowerState
 import io.orch8.mobile.StepHandler
 import io.orch8.mobile.InstanceStateKind
+
+/** Reported to the engine as `sdkVersion`; kept equal to package.json `version`. */
+internal const val ORCH8_EXPO_SDK_VERSION = "expo-0.7.1"
+
+// UniFFI maps Rust u32/u64 to kotlin.UInt/ULong. JS numbers arrive as
+// Double/Int/Long, and Expo cannot return unsigned inline classes, so convert
+// at the boundary.
+private fun Map<String, Any?>.uint(key: String, default: UInt): UInt =
+    (this[key] as? Number)?.toLong()?.also { require(it >= 0) { "$key must be >= 0" } }?.toUInt() ?: default
+
+private fun Map<String, Any?>.ulong(key: String, default: ULong): ULong =
+    (this[key] as? Number)?.toLong()?.also { require(it >= 0) { "$key must be >= 0" } }?.toULong() ?: default
 
 class Orch8ExpoModule : Module() {
     private var engine: MobileEngine? = null
@@ -19,22 +32,22 @@ class Orch8ExpoModule : Module() {
 
         Function("createEngine") { dbPath: String, config: Map<String, Any?> ->
             val cfg = MobileEngineConfig(
-                tickIntervalMs = (config["tickIntervalMs"] as? Number)?.toLong() ?: 100L,
-                maxConcurrentSteps = (config["maxConcurrentSteps"] as? Number)?.toInt() ?: 4,
-                maxStepsPerInstance = (config["maxStepsPerInstance"] as? Number)?.toInt() ?: 1000,
-                maxConcurrentInstances = (config["maxConcurrentInstances"] as? Number)?.toInt() ?: 10,
-                maxTickDurationMs = (config["maxTickDurationMs"] as? Number)?.toLong() ?: 5000L,
-                maxInstanceLifetimeSecs = (config["maxInstanceLifetimeSecs"] as? Number)?.toLong() ?: 86400L,
-                maxStoredSequences = (config["maxStoredSequences"] as? Number)?.toInt() ?: 50,
-                maxSequenceSizeBytes = (config["maxSequenceSizeBytes"] as? Number)?.toLong() ?: 1048576L,
-                handlerTimeoutMs = (config["handlerTimeoutMs"] as? Number)?.toLong() ?: 30000L,
-                operationTimeoutMs = (config["operationTimeoutMs"] as? Number)?.toLong() ?: 10000L,
+                tickIntervalMs = config.ulong("tickIntervalMs", 100uL),
+                maxConcurrentSteps = config.uint("maxConcurrentSteps", 4u),
+                maxStepsPerInstance = config.uint("maxStepsPerInstance", 1000u),
+                maxConcurrentInstances = config.uint("maxConcurrentInstances", 10u),
+                maxTickDurationMs = config.ulong("maxTickDurationMs", 5000uL),
+                maxInstanceLifetimeSecs = config.ulong("maxInstanceLifetimeSecs", 86400uL),
+                maxStoredSequences = config.uint("maxStoredSequences", 50u),
+                maxSequenceSizeBytes = config.ulong("maxSequenceSizeBytes", 1048576uL),
+                handlerTimeoutMs = config.ulong("handlerTimeoutMs", 30000uL),
+                operationTimeoutMs = config.ulong("operationTimeoutMs", 10000uL),
                 telemetryEnabled = config["telemetryEnabled"] as? Boolean ?: true,
                 telemetryUrl = config["telemetryUrl"] as? String ?: "",
                 environment = config["environment"] as? String ?: "production",
                 rootPublicKey = config["rootPublicKey"] as? String ?: "",
-                sdkVersion = "expo-0.3.0",
-                memoryBudgetBytes = (config["memoryBudgetBytes"] as? Number)?.toLong() ?: 0L,
+                sdkVersion = ORCH8_EXPO_SDK_VERSION,
+                memoryBudgetBytes = config.ulong("memoryBudgetBytes", 0uL),
                 sequencesUrl = config["sequencesUrl"] as? String ?: "",
                 syncUrl = config["syncUrl"] as? String ?: "",
                 deviceId = config["deviceId"] as? String ?: "",
@@ -46,6 +59,7 @@ class Orch8ExpoModule : Module() {
         Function("destroyEngine") {
             engine?.pause()
             engine = null
+            Unit
         }
 
         Function("registerHandler") { name: String ->
@@ -68,8 +82,8 @@ class Orch8ExpoModule : Module() {
             val eng = engine ?: throw EngineNotInitialized()
             val result = eng.tickOnce()
             mapOf(
-                "instancesAdvanced" to result.instancesAdvanced,
-                "stepsExecuted" to result.stepsExecuted,
+                "instancesAdvanced" to result.instancesAdvanced.toInt(),
+                "stepsExecuted" to result.stepsExecuted.toInt(),
                 "hasPendingWork" to result.hasPendingWork,
             )
         }
@@ -153,7 +167,7 @@ class Orch8ExpoModule : Module() {
                 "capsuleId" to result.capsuleId,
                 "continuityId" to result.continuityId,
                 "instanceId" to result.instanceId,
-                "sourceEpoch" to result.sourceEpoch,
+                "sourceEpoch" to result.sourceEpoch.toLong(),
                 "state" to result.state,
             )
         }
@@ -186,24 +200,37 @@ class Orch8ExpoModule : Module() {
 
         AsyncFunction("sync") { manifestUrl: String ->
             val eng = engine ?: throw EngineNotInitialized()
-            val result = eng.sync(manifestUrl)
+            val result = eng.sync(manifestUrl, null)
             mapOf(
-                "sequencesUpdated" to result.sequencesUpdated,
-                "sequencesRemoved" to result.sequencesRemoved,
+                "sequencesUpdated" to (result.added + result.updated).toInt(),
+                "sequencesRemoved" to result.removed.toInt(),
+                "added" to result.added.toInt(),
+                "updated" to result.updated.toInt(),
+                "removed" to result.removed.toInt(),
+                "skipped" to result.skipped.toInt(),
+                "signatureFailures" to result.signatureFailures.toInt(),
             )
         }
 
         Function("setDeviceContext") { deviceId: String, osName: String, osVersion: String, appVersion: String ->
             val eng = engine ?: throw EngineNotInitialized()
-            eng.setDeviceContext(deviceId, osName, osVersion, appVersion)
+            eng.setDeviceContext(
+                DeviceContext(
+                    deviceId = deviceId,
+                    osName = osName,
+                    osVersion = osVersion,
+                    appVersion = appVersion,
+                    sdkVersion = ORCH8_EXPO_SDK_VERSION,
+                ),
+            )
         }
 
         AsyncFunction("flushTelemetry") { endpoint: String ->
             val eng = engine ?: throw EngineNotInitialized()
             val result = eng.flushTelemetry(endpoint)
             mapOf(
-                "eventsFlushed" to result.eventsFlushed,
-                "bytesSent" to result.bytesSent,
+                "eventsFlushed" to result.sent.toLong(),
+                "dropped" to result.dropped.toLong(),
             )
         }
     }
@@ -226,12 +253,14 @@ private class ExpoStepHandler(
     private val module: Orch8ExpoModule,
     private val handlerName: String,
 ) : StepHandler {
-    override fun execute(instanceId: String, params: String): String {
+    override fun execute(stepName: String, input: String): String {
         module.sendEvent("onEngineEvent", mapOf(
             "type" to "handlerInvoked",
-            "instanceId" to instanceId,
+            "stepName" to stepName,
+            // Deprecated: 0.7.0 sent the step name under this key.
+            "instanceId" to stepName,
             "handlerName" to handlerName,
-            "params" to params,
+            "params" to input,
         ))
         return "{}"
     }

@@ -316,7 +316,7 @@ describe("NativeEngine", () => {
     });
 
     it("flushTelemetry() returns native result", () => {
-      const result = { eventsFlushed: 42, bytesSent: 8192 };
+      const result = { eventsFlushed: 42, dropped: 0 };
       mockNativeModule.flushTelemetry.mockReturnValue(result);
       expect(engine.flushTelemetry("http://telemetry.example.com")).toEqual(result);
     });

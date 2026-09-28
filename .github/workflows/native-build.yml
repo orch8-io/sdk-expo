@@ -1,0 +1,167 @@
+name: Native build
+
+# Proves that the published tarball resolves Orch8's native engine on both
+# platforms. @orch8.io/expo 0.7.0 shipped without a podspec and with an
+# Android dependency on an AAR file that was not in the package, and nothing
+# caught it because only the TypeScript side was ever built. Every job here
+# consumes the output of `npm pack`, exactly what npm users download.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Build, test and pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Pack
+        run: |
+          npm pack
+          mv orch8.io-expo-*.tgz orch8-expo.tgz
+      - name: Tarball contains every native file
+        run: |
+          contents="$(tar -tzf orch8-expo.tgz)"
+          for required in \
+            package/ios/Orch8Expo.podspec \
+            package/ios/Orch8ExpoModule.swift \
+            package/android/build.gradle \
+            package/android/src/main/java/io/orch8/expo/Orch8ExpoModule.kt \
+            package/expo-module.config.json \
+            package/app.plugin.js \
+            package/plugin/withOrch8.js \
+            package/build/index.js; do
+            if ! grep -Fxq "$required" <<<"$contents"; then
+              echo "::error::npm tarball is missing ${required#package/}"
+              exit 1
+            fi
+          done
+          if grep -E '\.aar$|/Pods/|android/build/' <<<"$contents"; then
+            echo "::error::npm tarball contains build output or vendored binaries"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: orch8-expo-tarball
+          path: orch8-expo.tgz
+
+  ios:
+    name: iOS (prebuild + pod install + simulator build)
+    runs-on: macos-15
+    timeout-minutes: 75
+    needs: [package]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: orch8-expo-tarball
+      - name: Select Xcode 16
+        # React Native 0.76 (Expo SDK 52) vendors fmt 11.0.2, which does not
+        # compile with the Xcode 26 toolchain. Pin the newest Xcode 16 on the
+        # image; fall back to the default when the image has none.
+        run: |
+          xcode="$(find /Applications -maxdepth 1 -name 'Xcode_16*.app' | sort -V | tail -1)"
+          if [[ -n "$xcode" ]]; then
+            sudo xcode-select -s "$xcode"
+          fi
+          xcodebuild -version
+      - name: Install sample app with the packed SDK
+        working-directory: example
+        run: |
+          npm install --no-audit --no-fund
+          npm install --no-audit --no-fund ../orch8-expo.tgz
+      - name: expo prebuild
+        working-directory: example
+        run: npx expo prebuild --clean --no-install --platform ios
+      - name: Config plugin raised the deployment target
+        working-directory: example/ios
+        run: |
+          target="$(node -p 'require("./Podfile.properties.json")["ios.deploymentTarget"]')"
+          if [[ "$target" != "16.0" ]]; then
+            echo "::error::ios.deploymentTarget is ${target}, expected 16.0"
+            exit 1
+          fi
+      - name: pod install (must resolve Orch8Mobile)
+        working-directory: example/ios
+        run: |
+          pod install --repo-update
+          expected="$(node -p 'require("../node_modules/@orch8.io/expo/package.json").orch8NativeVersion')"
+          if ! grep -Fq "  - Orch8Mobile (${expected})" Podfile.lock; then
+            echo "::error::Podfile.lock does not pin Orch8Mobile ${expected}"
+            cat Podfile.lock
+            exit 1
+          fi
+          grep -Fq '  - Orch8Expo (' Podfile.lock
+      - name: Build for simulator (compiles `import Orch8Mobile`)
+        working-directory: example/ios
+        run: |
+          set -o pipefail
+          workspace="$(find . -maxdepth 1 -name '*.xcworkspace' | head -1)"
+          scheme="$(basename "$workspace" .xcworkspace)"
+          xcodebuild \
+            -workspace "$workspace" \
+            -scheme "$scheme" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tail -n 200
+
+  android:
+    name: Android (prebuild + assembleDebug)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [package]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: orch8-expo-tarball
+      - name: Install sample app with the packed SDK
+        working-directory: example
+        run: |
+          npm install --no-audit --no-fund
+          npm install --no-audit --no-fund ../orch8-expo.tgz
+      - name: expo prebuild
+        working-directory: example
+        run: npx expo prebuild --clean --no-install --platform android
+      - name: Config plugin declared Orch8's Maven repository
+        working-directory: example/android
+        run: grep -F 'https://raw.githubusercontent.com/orch8-io/maven/main' gradle.properties
+      - name: assembleDebug (must resolve io.orch8:orch8-mobile)
+        working-directory: example/android
+        run: ./gradlew --no-daemon --stacktrace :app:assembleDebug
+      - name: APK contains the engine
+        working-directory: example/android
+        run: |
+          apk="$(find app/build/outputs/apk/debug -name '*.apk' | head -1)"
+          unzip -l "$apk" | grep -F 'lib/arm64-v8a/liborch8_mobile.so'

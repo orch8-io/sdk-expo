@@ -1,6 +1,9 @@
 import ExpoModulesCore
 import Orch8Mobile
 
+/// Reported to the engine as `sdkVersion`; kept equal to package.json `version`.
+let orch8ExpoSdkVersion = "expo-0.7.1"
+
 public class Orch8ExpoModule: Module {
     private var engine: MobileEngine?
 
@@ -25,7 +28,7 @@ public class Orch8ExpoModule: Module {
                 telemetryUrl: config["telemetryUrl"] as? String ?? "",
                 environment: config["environment"] as? String ?? "production",
                 rootPublicKey: config["rootPublicKey"] as? String ?? "",
-                sdkVersion: "expo-0.3.0",
+                sdkVersion: orch8ExpoSdkVersion,
                 memoryBudgetBytes: UInt64(config["memoryBudgetBytes"] as? Int ?? 0),
                 sequencesUrl: config["sequencesUrl"] as? String ?? "",
                 syncUrl: config["syncUrl"] as? String ?? "",
@@ -184,29 +187,35 @@ public class Orch8ExpoModule: Module {
 
         AsyncFunction("sync") { (manifestUrl: String) -> [String: Any] in
             guard let eng = self.engine else { throw EngineNotInitialized() }
-            let result = try eng.sync(manifestUrl: manifestUrl)
+            let result = try eng.sync(manifestUrl: manifestUrl, tokenProvider: nil)
             return [
-                "sequencesUpdated": result.sequencesUpdated,
-                "sequencesRemoved": result.sequencesRemoved,
+                "sequencesUpdated": Int(result.added) + Int(result.updated),
+                "sequencesRemoved": Int(result.removed),
+                "added": Int(result.added),
+                "updated": Int(result.updated),
+                "removed": Int(result.removed),
+                "skipped": Int(result.skipped),
+                "signatureFailures": Int(result.signatureFailures),
             ]
         }
 
         Function("setDeviceContext") { (deviceId: String, osName: String, osVersion: String, appVersion: String) in
             guard let eng = self.engine else { throw EngineNotInitialized() }
-            eng.setDeviceContext(
+            eng.setDeviceContext(ctx: DeviceContext(
                 deviceId: deviceId,
                 osName: osName,
                 osVersion: osVersion,
-                appVersion: appVersion
-            )
+                appVersion: appVersion,
+                sdkVersion: orch8ExpoSdkVersion
+            ))
         }
 
         AsyncFunction("flushTelemetry") { (endpoint: String) -> [String: Any] in
             guard let eng = self.engine else { throw EngineNotInitialized() }
-            let result = try eng.flushTelemetry(endpoint: endpoint)
+            let result = try eng.flushTelemetry(endpointUrl: endpoint)
             return [
-                "eventsFlushed": result.eventsFlushed,
-                "bytesSent": result.bytesSent,
+                "eventsFlushed": result.sent,
+                "dropped": result.dropped,
             ]
         }
     }
@@ -236,12 +245,14 @@ class ExpoStepHandler: StepHandler {
         self.handlerName = handlerName
     }
 
-    func execute(instanceId: String, params: String) throws -> String {
+    func execute(stepName: String, input: String) throws -> String {
         module?.sendEvent("onEngineEvent", [
             "type": "handlerInvoked",
-            "instanceId": instanceId,
+            "stepName": stepName,
+            // Deprecated: 0.7.0 sent the step name under this key.
+            "instanceId": stepName,
             "handlerName": handlerName,
-            "params": params,
+            "params": input,
         ])
         return "{}"
     }

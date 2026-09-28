@@ -1,9 +1,17 @@
 {
-  "platforms": ["ios", "android"],
+  "platforms": [
+    "ios",
+    "android"
+  ],
   "ios": {
-    "modules": ["Orch8ExpoModule"]
+    "modules": [
+      "Orch8ExpoModule"
+    ],
+    "podspecPath": "./ios/Orch8Expo.podspec"
   },
   "android": {
-    "modules": ["io.orch8.expo.Orch8ExpoModule"]
+    "modules": [
+      "io.orch8.expo.Orch8ExpoModule"
+    ]
   }
 }

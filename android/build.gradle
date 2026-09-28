@@ -1,0 +1,54 @@
+apply plugin: 'com.android.library'
+
+// Single source of truth for versions: package.json. `orch8NativeVersion` is
+// the engine release whose AAR (io.orch8:orch8-mobile) this module is compiled
+// against; it is pinned exactly for the same reason the podspec pins
+// Orch8Mobile.
+def packageJson = new groovy.json.JsonSlurper().parse(file("${projectDir}/../package.json"))
+def orch8NativeVersion = packageJson.orch8NativeVersion
+
+group = 'io.orch8.expo'
+version = packageJson.version
+
+def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+useDefaultAndroidSdkVersions()
+
+// Orch8's public Maven repository hosts io.orch8:orch8-mobile. Declaring it
+// here lets this module compile; the app project also needs it, which the
+// `@orch8.io/expo` config plugin adds (gradle.properties
+// `android.extraMavenRepos`, applied to allprojects by Expo autolinking).
+repositories {
+    maven { url 'https://raw.githubusercontent.com/orch8-io/maven/main' }
+}
+
+android {
+    namespace "io.orch8.expo"
+    defaultConfig {
+        // liborch8_mobile.so and the AAR are built for API 24+.
+        minSdkVersion Math.max(24, (safeExtGet("minSdkVersion", 24) as Integer))
+        versionCode 1
+        versionName packageJson.version
+    }
+    lint {
+        abortOnError false
+    }
+}
+
+dependencies {
+    implementation "io.orch8:orch8-mobile:${orch8NativeVersion}"
+}
+
+// io.orch8:orch8-mobile is compiled with Kotlin 2.1 (metadata 2.1.0). Expo
+// SDK 52 apps build with Kotlin 1.9.x, whose compiler rejects newer metadata
+// by default. This module only calls the plain UniFFI surface (classes,
+// functions, enums), which 1.9 reads correctly, so skip the version check for
+// this module instead of forcing a Kotlin upgrade on the whole app.
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    kotlinOptions {
+        freeCompilerArgs += ["-Xskip-metadata-version-check"]
+    }
+}

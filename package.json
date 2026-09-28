@@ -1,6 +1,7 @@
 {
   "name": "@orch8.io/expo",
-  "version": "0.7.0",
+  "version": "0.7.1",
+  "orch8NativeVersion": "0.7.1",
   "description": "Expo SDK for Orch8 workflow engine — REST client, React hooks, and native engine bridge",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -15,21 +16,33 @@
         "types": "./build/index.d.ts",
         "default": "./build/index.js"
       }
-    }
+    },
+    "./app.plugin.js": "./app.plugin.js",
+    "./package.json": "./package.json"
   },
   "files": [
     "build",
+    "!build/__tests__",
     "ios",
-    "android",
+    "!ios/build",
+    "!ios/Pods",
+    "android/build.gradle",
+    "android/src",
+    "plugin",
+    "app.plugin.js",
     "expo-module.config.json",
-    "!build/__tests__"
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "clean": "rm -rf build"
+    "clean": "rm -rf build",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run clean && npm run build"
   },
   "keywords": [
     "orch8",
@@ -62,5 +75,10 @@
     "react-native": "^0.76.0",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
+  },
+  "author": "Orch8",
+  "homepage": "https://github.com/orch8-io/sdk-expo#readme",
+  "bugs": {
+    "url": "https://github.com/orch8-io/sdk-expo/issues"
   }
 }

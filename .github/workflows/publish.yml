@@ -10,8 +10,14 @@ permissions:
   id-token: write
 
 jobs:
+  # Never publish a tarball whose native dependencies do not resolve.
+  native-build:
+    name: Native build
+    uses: ./.github/workflows/native-build.yml
+
   publish:
     name: Publish to npm
+    needs: [native-build]
     runs-on: ubuntu-latest
     environment: npm
     steps:
