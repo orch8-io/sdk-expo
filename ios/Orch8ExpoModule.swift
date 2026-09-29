@@ -15,6 +15,15 @@ let orch8RuntimeNodeAvailable = true
 let orch8RuntimeNodeAvailable = false
 #endif
 
+/// Delegation from phone-local workflows (`startDelegation`, `delegate`, ...)
+/// likewise exists after 0.7.1; the podspec defines ORCH8_DELEGATION when
+/// `orch8NativeVersion` >= `orch8DelegationMinVersion`.
+#if ORCH8_DELEGATION
+let orch8DelegationAvailable = true
+#else
+let orch8DelegationAvailable = false
+#endif
+
 public class Orch8ExpoModule: Module {
     private var engine: MobileEngine?
     private var handlerTimeoutMs: UInt64 = 30_000
@@ -27,6 +36,7 @@ public class Orch8ExpoModule: Module {
 
         Constants([
             "runtimeNodeAvailable": orch8RuntimeNodeAvailable,
+            "delegationAvailable": orch8DelegationAvailable,
         ])
 
         Function("createEngine") { (dbPath: String, config: [String: Any]) in
@@ -347,7 +357,70 @@ public class Orch8ExpoModule: Module {
             try eng.enableBuiltin(name: name)
         }
         #endif
+
+        #if ORCH8_DELEGATION
+        AsyncFunction("startDelegation") { (options: [String: Any]) in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            try eng.startDelegation(options: DelegationOptions(
+                tenantId: options["tenantId"] as? String ?? "",
+                pollIntervalMs: UInt64(max(1, (options["pollIntervalMs"] as? NSNumber)?.int64Value ?? 2000)),
+                ttlSecs: UInt32(min(86_400, max(1, (options["ttlSecs"] as? NSNumber)?.int64Value ?? 600)))
+            ))
+        }
+
+        AsyncFunction("stopDelegation") {
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            eng.stopDelegation()
+        }
+
+        AsyncFunction("delegate") { (request: [String: Any]) -> String in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            return try eng.delegate(request: DelegateRequest(
+                instanceId: request["instanceId"] as? String ?? "",
+                destinationRuntimeId: request["destinationRuntimeId"] as? String ?? "",
+                subSequenceId: request["subSequenceId"] as? String ?? "",
+                inputJson: request["inputJson"] as? String ?? "{}"
+            ))
+        }
+
+        AsyncFunction("delegationStatus") { (delegationId: String) -> [String: Any] in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            return Self.delegationStatus(try eng.delegationStatus(delegationId: delegationId))
+        }
+
+        AsyncFunction("listDelegations") { () -> [[String: Any]] in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            return try eng.listDelegations().map(Self.delegationStatus)
+        }
+
+        AsyncFunction("delegationStats") { () -> [String: Any] in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            let s = eng.delegationStats()
+            return [
+                "running": s.running,
+                "delegated": Int(clamping: s.delegated),
+                "completed": Int(clamping: s.completed),
+                "failed": Int(clamping: s.failed),
+                "abandoned": Int(clamping: s.abandoned),
+                "resumed": Int(clamping: s.resumed),
+            ]
+        }
+        #endif
     }
+
+    #if ORCH8_DELEGATION
+    private static func delegationStatus(_ s: DelegationStatus) -> [String: Any] {
+        [
+            "delegationId": s.delegationId,
+            "state": s.state,
+            "localInstanceId": s.localInstanceId,
+            "blockId": s.blockId ?? NSNull(),
+            "destinationRuntimeId": s.destinationRuntimeId ?? NSNull(),
+            "outputJson": s.outputJson ?? NSNull(),
+            "error": s.error ?? NSNull(),
+        ]
+    }
+    #endif
 
     #if ORCH8_RUNTIME_NODE
     private static func connectivity(_ value: String?) -> NodeConnectivity? {

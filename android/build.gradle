@@ -20,6 +20,9 @@ def versionAtLeast = { String v, String min ->
     return true
 }
 def runtimeNodeEnabled = versionAtLeast(orch8NativeVersion, packageJson.orch8RuntimeNodeMinVersion)
+// Same for delegation from phone-local workflows (src/delegation vs
+// src/delegationUnavailable), gated on its own key.
+def delegationEnabled = versionAtLeast(orch8NativeVersion, packageJson.orch8DelegationMinVersion)
 
 group = 'io.orch8.expo'
 version = packageJson.version
@@ -53,6 +56,7 @@ android {
     sourceSets {
         main {
             java.srcDirs += runtimeNodeEnabled ? 'src/runtimeNode/java' : 'src/runtimeNodeUnavailable/java'
+            java.srcDirs += delegationEnabled ? 'src/delegation/java' : 'src/delegationUnavailable/java'
         }
     }
 }

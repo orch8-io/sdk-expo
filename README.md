@@ -81,6 +81,44 @@ Also: `nodeRuntimeId()`, `updateNodeStatus(connectivity, batteryPercent)`,
 `enableBuiltin("http_request")`. Remote tasks carry `__orch8` in their params;
 `ctx.task.effectId` is the server's idempotency key for the step's effect.
 
+## Delegating from a phone-local workflow (Orch8 engine after 0.7.1)
+
+A step of a workflow running on the device's own engine whose `$runtime`
+places it on another runtime (`runtime_id` of another node, or
+`runtime_kinds` without `mobile`) is handed to that runtime through the server
+mailbox; the local instance parks and resumes exactly once with the result,
+across disconnects and app kills. Handler `orch8.delegation` delegates the
+server-side sequence `params.sequence_id` with `params.input`; any other
+handler delegates just that step. It needs `registerNode` and a node
+credential allowed to call the continuity API.
+
+Like the runtime node API, it is compiled only when `orch8NativeVersion` is at
+least `orch8DelegationMinVersion` (0.7.2): the podspec defines
+`ORCH8_DELEGATION` and `android/build.gradle` adds `src/delegation` instead of
+`src/delegationUnavailable`. Against 0.7.1, `engine.delegationAvailable` is
+`false` and the calls reject with the required engine version.
+
+```typescript
+if (engine.delegationAvailable) {
+  await engine.registerNode();
+  await engine.startDelegation({ tenantId: "acme" }); // on every launch
+
+  // Explicit delegation from app code (no local step is parked):
+  const delegationId = await engine.delegate({
+    instanceId,
+    destinationRuntimeId: desktopRuntimeId,
+    subSequenceId: classifySequenceId,
+    input: { photo: { id: photoId } },
+  });
+  const status = await engine.delegationStatus(delegationId);
+  // status.state: "preparing" | "delegated" | "completed" | "failed" | "abandoned"
+}
+```
+
+Also: `listDelegations()`, `delegationStats()` (`running`, `delegated`,
+`completed`, `failed`, `abandoned`, `resumed`) and `stopDelegation()`.
+`onPushWake` advances pending delegations immediately.
+
 New or experimental REST routes can be called with the authenticated low-level
 client:
 

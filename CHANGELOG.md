@@ -17,6 +17,17 @@
   podspec sets the `ORCH8_RUNTIME_NODE` Swift condition and the Gradle build
   picks `src/runtimeNode` over `src/runtimeNodeUnavailable`. Against 0.7.1,
   `runtimeNodeAvailable` is `false` and the calls reject with a clear error.
+- Delegation from phone-local workflows: `startDelegation`, `stopDelegation`,
+  `delegate`, `delegationStatus`, `listDelegations`, `delegationStats`, with
+  `NativeDelegationOptions`, `NativeDelegateRequest`, `NativeDelegationState`,
+  `NativeDelegationStatus` and `NativeDelegationStats`. A step of an
+  on-device workflow placed on another runtime is handed over through the
+  server mailbox and the local instance resumes exactly once with the result.
+  Gated like the runtime node API on its own key, `orch8DelegationMinVersion`
+  (0.7.2): the `ORCH8_DELEGATION` Swift condition and `src/delegation` over
+  `src/delegationUnavailable`. Against 0.7.1, `delegationAvailable` is
+  `false` and the calls reject with a clear error. Arguments are validated
+  before reaching the native module.
 
 ## 0.7.1
 

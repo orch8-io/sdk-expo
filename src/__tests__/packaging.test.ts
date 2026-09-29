@@ -14,6 +14,7 @@ const pkg = JSON.parse(read("package.json")) as {
   version: string;
   orch8NativeVersion: string;
   orch8RuntimeNodeMinVersion: string;
+  orch8DelegationMinVersion: string;
   files: string[];
   exports: Record<string, unknown>;
 };
@@ -78,6 +79,28 @@ describe("native distribution", () => {
     );
     const native = read("src/native.ts");
     expect(native).toContain(`RUNTIME_NODE_MIN_NATIVE_VERSION = "${pkg.orch8RuntimeNodeMinVersion}"`);
+  });
+
+  it("compiles the delegation API only against an engine that has it", () => {
+    expect(pkg.orch8DelegationMinVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    const podspec = read("ios/Orch8Expo.podspec");
+    expect(podspec).toContain("package.fetch('orch8DelegationMinVersion')");
+    expect(podspec).toContain("ORCH8_DELEGATION");
+    const swift = read("ios/Orch8ExpoModule.swift");
+    expect(swift).toContain("#if ORCH8_DELEGATION");
+    expect(swift.indexOf('AsyncFunction("startDelegation")')).toBeGreaterThan(swift.indexOf("#if ORCH8_DELEGATION"));
+
+    const gradle = read("android/build.gradle");
+    expect(gradle).toContain("packageJson.orch8DelegationMinVersion");
+    expect(gradle).toContain("'src/delegation/java' : 'src/delegationUnavailable/java'");
+    expect(read("android/src/delegation/java/io/orch8/expo/DelegationDefinitions.kt")).toContain(
+      "DELEGATION_AVAILABLE = true",
+    );
+    expect(read("android/src/delegationUnavailable/java/io/orch8/expo/DelegationDefinitions.kt")).toContain(
+      "DELEGATION_AVAILABLE = false",
+    );
+    const native = read("src/native.ts");
+    expect(native).toContain(`DELEGATION_MIN_NATIVE_VERSION = "${pkg.orch8DelegationMinVersion}"`);
   });
 
   it("publishes every native file and the config plugin", () => {

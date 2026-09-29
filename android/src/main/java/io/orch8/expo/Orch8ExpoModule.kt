@@ -40,7 +40,11 @@ class Orch8ExpoModule : Module() {
 
         // Whether the runtime node / worker functions below exist in this build
         // (src/runtimeNode vs src/runtimeNodeUnavailable, chosen by build.gradle).
-        Constants("runtimeNodeAvailable" to RUNTIME_NODE_AVAILABLE)
+        // Likewise for delegation (src/delegation vs src/delegationUnavailable).
+        Constants(
+            "runtimeNodeAvailable" to RUNTIME_NODE_AVAILABLE,
+            "delegationAvailable" to DELEGATION_AVAILABLE,
+        )
 
         Function("createEngine") { dbPath: String, config: Map<String, Any?> ->
             val cfg = MobileEngineConfig(
@@ -260,6 +264,7 @@ class Orch8ExpoModule : Module() {
         }
 
         runtimeNodeDefinitions { engine ?: throw EngineNotInitialized() }
+        delegationDefinitions { engine ?: throw EngineNotInitialized() }
     }
 
     private fun stateKindString(state: InstanceStateKind): String = when (state) {

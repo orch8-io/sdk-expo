@@ -10,6 +10,10 @@ import type {
   NativeContinuityImportResult,
   PowerState,
   NativeAsyncHandler,
+  NativeDelegateRequest,
+  NativeDelegationOptions,
+  NativeDelegationStats,
+  NativeDelegationStatus,
   NativeNodeCapabilities,
   NativeNodeConnectivity,
   NativeNodeRegistration,
@@ -68,6 +72,23 @@ interface Orch8NativeModule {
   workerStats?(): Promise<NativeWorkerStats>;
   onPushWake?(envelopeJson: string): Promise<boolean>;
   enableBuiltin?(name: string): void;
+  // Delegation from phone-local workflows: present only when the module was
+  // compiled against an engine that has it (`delegationAvailable`).
+  delegationAvailable?: boolean;
+  startDelegation?(options: NativeDelegationOptions): Promise<void>;
+  stopDelegation?(): Promise<void>;
+  delegate?(request: NativeModuleDelegateRequest): Promise<string>;
+  delegationStatus?(delegationId: string): Promise<NativeDelegationStatus>;
+  listDelegations?(): Promise<NativeDelegationStatus[]>;
+  delegationStats?(): Promise<NativeDelegationStats>;
+}
+
+/** `NativeDelegateRequest` as it crosses into the native module: input already JSON. */
+interface NativeModuleDelegateRequest {
+  instanceId: string;
+  destinationRuntimeId: string;
+  subSequenceId: string;
+  inputJson: string;
 }
 
 /** Throw from an async handler to fail the step permanently (no retry). */
@@ -111,6 +132,12 @@ export function parseTaskContext(params: string): NativeTaskContext | null {
 
 /** Minimum `orch8NativeVersion` whose pod/AAR contain the runtime node API. */
 export const RUNTIME_NODE_MIN_NATIVE_VERSION = "0.7.2";
+
+/** Minimum `orch8NativeVersion` whose pod/AAR contain the delegation API. */
+export const DELEGATION_MIN_NATIVE_VERSION = "0.7.2";
+
+/** Maximum delegation / grant lifetime the control plane accepts. */
+export const MAX_DELEGATION_TTL_SECS = 86_400;
 
 const NativeModule = requireNativeModule<Orch8NativeModule>("Orch8ExpoModule");
 
@@ -460,6 +487,91 @@ export class NativeEngine {
     this.node().enableBuiltin(name);
   }
 
+  // -- Delegation from phone-local workflows ----------------------------------
+
+  /**
+   * True when the native module was compiled against an engine with the
+   * delegation API (`orch8NativeVersion` >= 0.7.2). The published 0.7.1 pod
+   * and AAR predate it.
+   */
+  get delegationAvailable(): boolean {
+    return NativeModule.delegationAvailable === true;
+  }
+
+  private delegation(): Required<Pick<Orch8NativeModule,
+    | "startDelegation"
+    | "stopDelegation"
+    | "delegate"
+    | "delegationStatus"
+    | "listDelegations"
+    | "delegationStats">> {
+    this.assertReady();
+    if (!this.delegationAvailable) {
+      throw new Error(
+        "The delegation API needs @orch8.io/expo built against Orch8 engine " +
+          `${DELEGATION_MIN_NATIVE_VERSION} or later (orch8NativeVersion); ` +
+          "the 0.7.1 Orch8Mobile pod and AAR do not include it.",
+      );
+    }
+    return NativeModule as never;
+  }
+
+  /**
+   * Start the delegation pump: a step of a workflow running on this engine
+   * whose `$runtime` places it on another runtime is handed to that runtime
+   * through the server mailbox; the local instance parks and resumes exactly
+   * once with the result. Requires `registerNode`. Journaled delegations
+   * survive app kills: call again after every launch.
+   */
+  async startDelegation(options: NativeDelegationOptions): Promise<void> {
+    const d = this.delegation();
+    assertNonEmpty("tenantId", options?.tenantId);
+    if (options.pollIntervalMs !== undefined) assertPositiveInt("pollIntervalMs", options.pollIntervalMs);
+    if (options.ttlSecs !== undefined) {
+      assertPositiveInt("ttlSecs", options.ttlSecs);
+      if (options.ttlSecs > MAX_DELEGATION_TTL_SECS) {
+        throw new RangeError(`ttlSecs must be at most ${MAX_DELEGATION_TTL_SECS}`);
+      }
+    }
+    return d.startDelegation(options);
+  }
+
+  /** Pause the pump. Journaled delegations resume with the next `startDelegation`. */
+  async stopDelegation(): Promise<void> {
+    return this.delegation().stopDelegation();
+  }
+
+  /**
+   * Delegate a server-side sub-sequence on behalf of a local instance without
+   * parking a step. Resolves the delegation id; read the outcome with
+   * `delegationStatus`. Requires `startDelegation`.
+   */
+  async delegate(request: NativeDelegateRequest): Promise<string> {
+    const d = this.delegation();
+    return d.delegate({
+      instanceId: assertNonEmpty("instanceId", request?.instanceId),
+      destinationRuntimeId: assertNonEmpty("destinationRuntimeId", request.destinationRuntimeId),
+      subSequenceId: assertNonEmpty("subSequenceId", request.subSequenceId),
+      inputJson: delegationInputJson(request.input),
+    });
+  }
+
+  /** The locally journaled state of a delegation (rejects when unknown). */
+  async delegationStatus(delegationId: string): Promise<NativeDelegationStatus> {
+    const d = this.delegation();
+    return d.delegationStatus(assertNonEmpty("delegationId", delegationId));
+  }
+
+  /** Every journaled delegation, oldest first. */
+  async listDelegations(): Promise<NativeDelegationStatus[]> {
+    return this.delegation().listDelegations();
+  }
+
+  /** Pump counters (zeros while it is not running). */
+  async delegationStats(): Promise<NativeDelegationStats> {
+    return this.delegation().delegationStats();
+  }
+
   addListener(
     eventName: "onEngineEvent",
     listener: (event: NativeEngineEvent) => void,
@@ -472,6 +584,33 @@ function assertPercent(value: number): void {
   if (!Number.isInteger(value) || value < 0 || value > 100) {
     throw new RangeError("batteryPercent must be an integer between 0 and 100");
   }
+}
+
+function assertNonEmpty(name: string, value: unknown): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new TypeError(`${name} must be a non-empty string`);
+  }
+  return value;
+}
+
+function delegationInputJson(input: NativeDelegateRequest["input"]): string {
+  const value = input ?? {};
+  if (typeof value === "string") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw new TypeError("input must be a JSON object");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new TypeError("input must be a JSON object");
+    }
+    return value;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("input must be a JSON object");
+  }
+  return JSON.stringify(value);
 }
 
 function assertPositiveInt(name: string, value: number): void {
