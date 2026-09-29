@@ -16,6 +16,8 @@ const mockNativeModule: Record<string, any> = {
   workerStats: vi.fn(),
   onPushWake: vi.fn(async () => true),
   enableBuiltin: vi.fn(),
+  setTokenProvider: vi.fn(async () => undefined),
+  resolveToken: vi.fn(),
 };
 
 const listeners: Array<(event: any) => void> = [];
@@ -160,5 +162,72 @@ describe("runtime node gating", () => {
     expect(mockNativeModule.onPushWake).toHaveBeenCalledWith('{"task_id":"t"}');
     await expect(engine.onPushWake({ aps: {} })).resolves.toBe(false);
     expect(mockNativeModule.onPushWake).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("device-session token provider", () => {
+  let engine: InstanceType<typeof NativeEngine>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    listeners.length = 0;
+    mockNativeModule.runtimeNodeAvailable = true;
+    engine = new NativeEngine();
+    engine.create("/db");
+  });
+
+  it("rejects with the required engine version when the native module is too old", async () => {
+    mockNativeModule.runtimeNodeAvailable = false;
+    const fetchToken = vi.fn(async () => "dst_1");
+    await expect(engine.setTokenProvider(fetchToken)).rejects.toThrow(/0\.7\.2 or later/);
+    expect(fetchToken).not.toHaveBeenCalled();
+    expect(mockNativeModule.setTokenProvider).not.toHaveBeenCalled();
+  });
+
+  it("awaits the first token and installs it natively", async () => {
+    const fetchToken = vi.fn(async () => "dst_1");
+    await engine.setTokenProvider(fetchToken);
+    expect(fetchToken).toHaveBeenCalledTimes(1);
+    expect(mockNativeModule.setTokenProvider).toHaveBeenCalledWith("dst_1");
+  });
+
+  it("rejects an empty first token or a non-function", async () => {
+    await expect(engine.setTokenProvider(async () => "")).rejects.toThrow(TypeError);
+    await expect(engine.setTokenProvider("dst_1" as never)).rejects.toThrow(TypeError);
+    expect(mockNativeModule.setTokenProvider).not.toHaveBeenCalled();
+  });
+
+  it("answers a native refresh request with a fresh token", async () => {
+    const tokens = ["dst_1", "dst_2"];
+    await engine.setTokenProvider(async () => tokens.shift()!);
+    emit({ type: "tokenRequest", requestId: "tok-1" });
+    await flush();
+    expect(mockNativeModule.resolveToken).toHaveBeenCalledWith("tok-1", "dst_2", null);
+  });
+
+  it("reports provider failures and empty tokens as errors", async () => {
+    let calls = 0;
+    await engine.setTokenProvider(async () => {
+      calls += 1;
+      if (calls === 1) return "dst_1";
+      if (calls === 2) throw new Error("backend down");
+      return "  ";
+    });
+    emit({ type: "tokenRequest", requestId: "tok-1" });
+    await flush();
+    expect(mockNativeModule.resolveToken).toHaveBeenCalledWith("tok-1", null, "backend down");
+    emit({ type: "tokenRequest", requestId: "tok-2" });
+    await flush();
+    expect(mockNativeModule.resolveToken).toHaveBeenCalledWith(
+      "tok-2", null, "token provider returned an empty token",
+    );
+  });
+
+  it("stops answering after destroy", async () => {
+    await engine.setTokenProvider(async () => "dst_1");
+    engine.destroy();
+    expect(listeners).toHaveLength(0);
+    await engine.dispatchTokenRequest({ type: "tokenRequest", requestId: "tok-9" });
+    expect(mockNativeModule.resolveToken).toHaveBeenCalledWith("tok-9", null, "no token provider installed");
   });
 });

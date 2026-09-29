@@ -33,6 +33,9 @@ class Orch8ExpoModule : Module() {
     @Volatile private var handlerTimeoutMs: Long = 30_000
     internal val pendingHandlers = PendingHandlerCalls()
 
+    /** Outstanding token refreshes (`tokenRequest` events awaiting `resolveToken`). */
+    internal val pendingTokens = PendingHandlerCalls()
+
     override fun definition() = ModuleDefinition {
         Name("Orch8ExpoModule")
 
@@ -77,6 +80,7 @@ class Orch8ExpoModule : Module() {
             engine?.pause()
             engine = null
             pendingHandlers.failAll("engine destroyed")
+            pendingTokens.failAll("engine destroyed")
             Unit
         }
 
@@ -89,6 +93,11 @@ class Orch8ExpoModule : Module() {
 
         Function("resolveHandler") { requestId: String, output: String?, error: String?, permanent: Boolean ->
             pendingHandlers.resolve(requestId, output, error, permanent)
+        }
+
+        // Answer to a `tokenRequest` event from ExpoTokenProvider.
+        Function("resolveToken") { requestId: String, token: String?, error: String? ->
+            pendingTokens.resolve(requestId, token, error, false)
         }
 
         Function("registerHandler") { name: String ->
@@ -264,6 +273,7 @@ class Orch8ExpoModule : Module() {
         }
 
         runtimeNodeDefinitions { engine ?: throw EngineNotInitialized() }
+        tokenProviderDefinitions(this@Orch8ExpoModule) { engine ?: throw EngineNotInitialized() }
         delegationDefinitions { engine ?: throw EngineNotInitialized() }
     }
 

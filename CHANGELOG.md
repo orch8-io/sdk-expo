@@ -4,6 +4,17 @@
 
 ### Added
 
+- `NativeEngine.setTokenProvider(fetchToken)`: authenticate node
+  registration, worker leases, delegation and sync with short-lived device
+  sessions (`dst_…`) that your backend mints with an operator key
+  (`POST /runtimes/device-sessions`, e.g. `@orch8.io/sdk`
+  `createDeviceSession`) for the device's `nodeRuntimeId()`. The callback is
+  awaited once, then again whenever the control plane answers 401 (native
+  `tokenRequest` event answered with `resolveToken`, 30 s timeout); the engine
+  retries the request once. Uses the runtime node gate
+  (`orch8RuntimeNodeMinVersion`, 0.7.2): `MobileEngine.setTokenProvider` ships
+  in the same engine release. Exported type `NativeTokenProvider`.
+
 - `NativeEngine.registerAsyncHandler(name, handler)`: the native engine thread
   waits for the JS handler's result (up to `handlerTimeoutMs`) instead of
   completing the step with `{}`. `PermanentHandlerError` fails without retry;
@@ -28,6 +39,12 @@
   `src/delegationUnavailable`. Against 0.7.1, `delegationAvailable` is
   `false` and the calls reject with a clear error. Arguments are validated
   before reaching the native module.
+
+### Deprecated
+
+- `NativeEngineConfig.syncApiKey` is legacy and not for production apps: a
+  key in the app binary is extractable. Use `setTokenProvider` with device
+  sessions instead. It keeps working.
 
 ## 0.7.1
 

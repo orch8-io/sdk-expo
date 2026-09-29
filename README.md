@@ -81,6 +81,66 @@ Also: `nodeRuntimeId()`, `updateNodeStatus(connectivity, batteryPercent)`,
 `enableBuiltin("http_request")`. Remote tasks carry `__orch8` in their params;
 `ctx.task.effectId` is the server's idempotency key for the step's effect.
 
+## Device sessions: authenticating the node (Orch8 engine after 0.7.1)
+
+Never ship an operator key (or any stored API key) in the app: anyone can
+extract it from the binary. The recommended flow:
+
+1. **Your backend holds the operator key** and exposes an endpoint for signed-in
+   users that mints a short-lived device session (`dst_…`) for the device's
+   `deviceId` and `nodeRuntimeId()` with `POST /runtimes/device-sessions`.
+2. **The app fetches it through the token provider.** `setTokenProvider` awaits
+   your callback once, and the engine calls it again whenever the control
+   plane answers 401 (expired session), then retries the request once. Node
+   registration, worker leases, delegation and sync all use it.
+
+Backend (Node, [`@orch8.io/sdk`](https://www.npmjs.com/package/@orch8.io/sdk)):
+
+```typescript
+import { Orch8Client } from "@orch8.io/sdk";
+
+const orch8 = new Orch8Client({ baseUrl, headers: { "x-api-key": process.env.ORCH8_OPERATOR_KEY! } });
+
+app.post("/api/orch8/device-session", requireLogin, async (req, res) => {
+  // Check that req.user owns req.body.deviceId before minting.
+  const session = await orch8.createDeviceSession({
+    deviceId: req.body.deviceId,
+    runtimeId: req.body.nodeRuntimeId,
+    handlers: ["scan_document"], // what the phone may claim; [] = delegate only
+    ttlSecs: 3600,               // default 3600, max 86400
+  });
+  res.json({ token: session.token });
+});
+```
+
+App:
+
+```typescript
+engine.create(dbPath, { syncUrl: "https://orch8.example.com/mobile/sync", deviceId });
+const nodeRuntimeId = await engine.nodeRuntimeId();
+await engine.setTokenProvider(async () => {
+  const res = await fetch("https://api.example.com/api/orch8/device-session", {
+    method: "POST",
+    headers: { authorization: `Bearer ${userToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ deviceId, nodeRuntimeId }),
+  });
+  return (await res.json()).token;
+});
+await engine.registerNode({ handlers: ["scan_document"] }); // after setTokenProvider
+```
+
+The token only reaches the device's own register / sync / runtime routes, the
+lease protocol as its runtime (allowlisted handlers) and the delegation calls
+for executions it owns. `setTokenProvider` uses the runtime node gate
+(`orch8RuntimeNodeMinVersion`); against 0.7.1 it rejects with the required
+engine version. A refresh that JS does not answer within 30 s fails the
+request.
+
+**`syncApiKey` is legacy and not for production apps.** It still works (a
+static key sent on every call), but it is extractable from the app; the engine
+logs a warning when the server reports that it is operator-capable or the root
+key.
+
 ## Delegating from a phone-local workflow (Orch8 engine after 0.7.1)
 
 A step of a workflow running on the device's own engine whose `$runtime`
@@ -90,7 +150,8 @@ mailbox; the local instance parks and resumes exactly once with the result,
 across disconnects and app kills. Handler `orch8.delegation` delegates the
 server-side sequence `params.sequence_id` with `params.input`; any other
 handler delegates just that step. It needs `registerNode` and a node
-credential allowed to call the continuity API.
+credential allowed to call the continuity API (a device session from
+`setTokenProvider`; see above).
 
 Like the runtime node API, it is compiled only when `orch8NativeVersion` is at
 least `orch8DelegationMinVersion` (0.7.2): the podspec defines

@@ -627,6 +627,12 @@ export interface NativeEngineConfig {
   sequencesUrl?: string;
   syncUrl?: string;
   deviceId?: string;
+  /**
+   * @deprecated Legacy static API key for node/sync calls — not for production
+   * apps: anything shipped in the app binary can be extracted. Use
+   * `NativeEngine.setTokenProvider` with short-lived device sessions minted by
+   * your backend instead.
+   */
   syncApiKey?: string;
 }
 
@@ -860,6 +866,14 @@ export interface NativeHandlerContext {
  * the raw params JSON. Return a JSON string or a serialisable value; throw
  * `PermanentHandlerError` to fail without retry.
  */
+/**
+ * Returns a fresh device-session token (`dst_…`) that your backend minted
+ * with `POST /runtimes/device-sessions` for this device and `nodeRuntimeId()`.
+ * Called once by `setTokenProvider` and again whenever the control plane
+ * rejects the current token (expired session).
+ */
+export type NativeTokenProvider = () => Promise<string> | string;
+
 export type NativeAsyncHandler = (
   params: string,
   context: NativeHandlerContext,

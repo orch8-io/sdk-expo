@@ -28,6 +28,8 @@ public class Orch8ExpoModule: Module {
     private var engine: MobileEngine?
     private var handlerTimeoutMs: UInt64 = 30_000
     let pendingHandlers = PendingHandlerCalls()
+    /// Outstanding token refreshes (`tokenRequest` events awaiting `resolveToken`).
+    let pendingTokens = PendingHandlerCalls()
 
     public func definition() -> ModuleDefinition {
         Name("Orch8ExpoModule")
@@ -72,6 +74,7 @@ public class Orch8ExpoModule: Module {
             }
             self.engine = nil
             self.pendingHandlers.failAll("engine destroyed")
+            self.pendingTokens.failAll("engine destroyed")
         }
 
         Function("registerHandler") { (name: String) in
@@ -92,6 +95,11 @@ public class Orch8ExpoModule: Module {
 
         Function("resolveHandler") { (requestId: String, output: String?, error: String?, permanent: Bool) in
             self.pendingHandlers.resolve(requestId, output: output, error: error, permanent: permanent)
+        }
+
+        // Answer to a `tokenRequest` event from ExpoTokenProvider.
+        Function("resolveToken") { (requestId: String, token: String?, error: String?) in
+            self.pendingTokens.resolve(requestId, output: token, error: error, permanent: false)
         }
 
         Function("resume") {
@@ -263,6 +271,13 @@ public class Orch8ExpoModule: Module {
         }
 
         #if ORCH8_RUNTIME_NODE
+        // Device-session credential for node, worker, delegation and sync
+        // calls; JS already awaited the first token.
+        AsyncFunction("setTokenProvider") { (initialToken: String) in
+            guard let eng = self.engine else { throw EngineNotInitialized() }
+            eng.setTokenProvider(provider: ExpoTokenProvider(module: self, initialToken: initialToken))
+        }
+
         AsyncFunction("nodeRuntimeId") { () -> String in
             guard let eng = self.engine else { throw EngineNotInitialized() }
             return try eng.nodeRuntimeId()
@@ -555,6 +570,51 @@ final class ExpoAsyncStepHandler: StepHandler, @unchecked Sendable {
         return outcome.output ?? "{}"
     }
 }
+
+#if ORCH8_RUNTIME_NODE
+/// UniFFI `TokenProvider` backed by the JS `setTokenProvider` callback.
+/// `currentToken` returns the last token JS delivered; `refreshToken` runs on
+/// an engine blocking thread (after a 401), emits `tokenRequest` and waits for
+/// `resolveToken`, bounded by `timeoutMs`.
+final class ExpoTokenProvider: TokenProvider, @unchecked Sendable {
+    static let timeoutMs: UInt64 = 30_000
+
+    private weak var module: Orch8ExpoModule?
+    private let lock = NSLock()
+    private var token: String
+
+    init(module: Orch8ExpoModule, initialToken: String) {
+        self.module = module
+        self.token = initialToken
+    }
+
+    func currentToken() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return token
+    }
+
+    func refreshToken() throws -> String {
+        guard let module else { throw MobileError.Engine(message: "Expo module released") }
+        let requestId = UUID().uuidString
+        module.pendingTokens.open(requestId)
+        module.sendEvent("onEngineEvent", [
+            "type": "tokenRequest",
+            "requestId": requestId,
+        ])
+        guard let outcome = module.pendingTokens.wait(requestId, timeoutMs: Self.timeoutMs) else {
+            throw MobileError.Engine(message: "token provider timed out after \(Self.timeoutMs) ms")
+        }
+        if let error = outcome.error {
+            throw MobileError.Engine(message: "token provider failed: \(error)")
+        }
+        guard let fresh = outcome.output, !fresh.isEmpty else {
+            throw MobileError.Engine(message: "token provider returned an empty token")
+        }
+        lock.lock(); token = fresh; lock.unlock()
+        return fresh
+    }
+}
+#endif
 
 class EngineNotInitialized: Exception {
     override var reason: String {

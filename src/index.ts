@@ -142,5 +142,6 @@ export type {
   NativeTaskContext,
   NativeHandlerContext,
   NativeAsyncHandler,
+  NativeTokenProvider,
   InstanceBase,
 } from "./types.js";

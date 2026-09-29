@@ -10,6 +10,7 @@ import type {
   NativeContinuityImportResult,
   PowerState,
   NativeAsyncHandler,
+  NativeTokenProvider,
   NativeDelegateRequest,
   NativeDelegationOptions,
   NativeDelegationStats,
@@ -72,6 +73,9 @@ interface Orch8NativeModule {
   workerStats?(): Promise<NativeWorkerStats>;
   onPushWake?(envelopeJson: string): Promise<boolean>;
   enableBuiltin?(name: string): void;
+  // Device-session token provider (same gate as the runtime node API).
+  setTokenProvider?(initialToken: string): Promise<void>;
+  resolveToken?(requestId: string, token: string | null, error: string | null): void;
   // Delegation from phone-local workflows: present only when the module was
   // compiled against an engine that has it (`delegationAvailable`).
   delegationAvailable?: boolean;
@@ -155,6 +159,11 @@ export type NativeEngineEvent =
       params: string;
     }
   | {
+      /** The native token provider needs a fresh token (`setTokenProvider`). */
+      type: "tokenRequest";
+      requestId: string;
+    }
+  | {
       type: "handlerInvoked";
       /** Name of the step whose handler ran. */
       stepName: string;
@@ -177,6 +186,8 @@ export class NativeEngine {
   private initialized = false;
   private readonly asyncHandlers = new Map<string, NativeAsyncHandler>();
   private handlerSubscription: { remove(): void } | null = null;
+  private tokenProvider: NativeTokenProvider | null = null;
+  private tokenSubscription: { remove(): void } | null = null;
 
   get isInitialized(): boolean {
     return this.initialized;
@@ -203,6 +214,9 @@ export class NativeEngine {
     this.handlerSubscription?.remove();
     this.handlerSubscription = null;
     this.asyncHandlers.clear();
+    this.tokenSubscription?.remove();
+    this.tokenSubscription = null;
+    this.tokenProvider = null;
   }
 
   registerHandler(name: string): void {
@@ -409,7 +423,9 @@ export class NativeEngine {
     | "runWorkerWindow"
     | "workerStats"
     | "onPushWake"
-    | "enableBuiltin">> {
+    | "enableBuiltin"
+    | "setTokenProvider"
+    | "resolveToken">> {
     this.assertReady();
     if (!this.runtimeNodeAvailable) {
       throw new Error(
@@ -428,7 +444,8 @@ export class NativeEngine {
 
   /**
    * Join the runtime mesh: registers device + capabilities with `syncUrl` and
-   * `syncApiKey`, then re-advertises before the 5-minute capability TTL.
+   * the node credential (the `setTokenProvider` device session, else the legacy
+   * `syncApiKey`), then re-advertises before the 5-minute capability TTL.
    */
   async registerNode(capabilities: NativeNodeCapabilities = {}): Promise<NativeNodeRegistration> {
     const n = this.node();
@@ -485,6 +502,51 @@ export class NativeEngine {
   /** Enable an opt-in builtin handler (`http_request`) before `resume()`. */
   enableBuiltin(name: string): void {
     this.node().enableBuiltin(name);
+  }
+
+  /**
+   * Authenticate node registration, worker leases, delegation and sync with
+   * short-lived device sessions instead of the legacy `syncApiKey`.
+   * `fetchToken` asks your backend for a token minted with
+   * `POST /runtimes/device-sessions` (operator key held by the backend) for
+   * this `deviceId` and `nodeRuntimeId()`. It is awaited once here, and again
+   * whenever the control plane answers 401 (the request is then retried once).
+   * Call it before `registerNode`. Never ship an operator key in the app.
+   */
+  async setTokenProvider(fetchToken: NativeTokenProvider): Promise<void> {
+    const n = this.node();
+    if (typeof fetchToken !== "function") {
+      throw new TypeError("setTokenProvider requires a function returning a token");
+    }
+    const token = assertNonEmpty("token", await fetchToken());
+    this.tokenProvider = fetchToken;
+    if (!this.tokenSubscription) {
+      this.tokenSubscription = emitter.addListener("onEngineEvent", (event: NativeEngineEvent) => {
+        if (event.type === "tokenRequest") void this.dispatchTokenRequest(event);
+      });
+    }
+    await n.setTokenProvider(token);
+  }
+
+  /** @internal exported for tests */
+  async dispatchTokenRequest(event: Extract<NativeEngineEvent, { type: "tokenRequest" }>): Promise<void> {
+    const resolve = NativeModule.resolveToken;
+    if (!resolve) return;
+    const provider = this.tokenProvider;
+    if (!provider) {
+      resolve(event.requestId, null, "no token provider installed");
+      return;
+    }
+    try {
+      const token = await provider();
+      if (typeof token !== "string" || token.trim() === "") {
+        resolve(event.requestId, null, "token provider returned an empty token");
+        return;
+      }
+      resolve(event.requestId, token, null);
+    } catch (e: unknown) {
+      resolve(event.requestId, null, e instanceof Error ? e.message : String(e));
+    }
   }
 
   // -- Delegation from phone-local workflows ----------------------------------
